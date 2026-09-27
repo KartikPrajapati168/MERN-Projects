@@ -19,7 +19,7 @@ const LoginPage = () => {
   useEffect(() => {
     const token = localStorage.getItem('token');
     const user = JSON.parse(localStorage.getItem('currentUser'));
-    
+
     if (token && user) {
       // Already logged in – redirect based on status
       if (user.isCompanyRegistered && user.isCompanyVerified) {
@@ -44,54 +44,44 @@ const LoginPage = () => {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (!formData.email || !formData.password) {
-      setError('Please enter both email and password');
-      return;
-    }
-
-    setLoading(true);
     setError('');
+    setLoading(true);
 
     try {
-      const response = await API.post('/auth/login', {
-        email: formData.email.trim(),
-        password: formData.password
+      const res = await API.post('/auth/login', {
+        email: formData.email.trim().toLowerCase(),
+        password: formData.password,
       });
 
-      if (response.data.success) {
-        const { token, user } = response.data;
-        
-        localStorage.setItem('token', token);
-        localStorage.setItem('currentUser', JSON.stringify(user));
-        
-        if (formData.remember) {
-          localStorage.setItem('rememberEmail', formData.email);
-        } else {
-          localStorage.removeItem('rememberEmail');
-        }
+      if (!res.data.success) {
+        setError(res.data.msg || 'Login failed');
+        setLoading(false);
+        return;
+      }
 
-        // Redirect based on user status
-        if (user.isCompanyRegistered && user.isCompanyVerified) {
-          const dashboardPath = user.role === 'generator' ? '/generator' : '/buyer';
-          navigate(dashboardPath);
-        } else if (user.isCompanyRegistered && !user.isCompanyVerified) {
-          navigate('/waiting');
-        } else {
-          navigate('/company-registration');
-        }
+      // ✅ Save token + user
+      localStorage.setItem('token', res.data.token);
+      localStorage.setItem('currentUser', JSON.stringify(res.data.user));
+
+      const { role, isCompanyVerified, isCompanyRegistered } = res.data.user;
+
+      // ✅ ROLE-BASED REDIRECT (correct priority)
+      if (role === 'admin') {
+        navigate('/admin', { replace: true });
+      } else if (role === 'generator') {
+        if (isCompanyVerified) navigate('/generator', { replace: true });
+        else if (isCompanyRegistered) navigate('/waiting', { replace: true });
+        else navigate('/register-company', { replace: true });
+      } else if (role === 'buyer') {
+        if (isCompanyVerified) navigate('/buyer', { replace: true });
+        else if (isCompanyRegistered) navigate('/waiting', { replace: true });
+        else navigate('/register-company', { replace: true });
       } else {
-        setError(response.data.msg || 'Login failed');
+        setError('Unknown user role');
+        setLoading(false);
       }
     } catch (err) {
-      console.error('Login error:', err);
-      if (err.response) {
-        setError(err.response.data?.msg || 'Invalid credentials');
-      } else if (err.request) {
-        setError('Cannot connect to server. Please check your network.');
-      } else {
-        setError('An unexpected error occurred.');
-      }
-    } finally {
+      setError(err.response?.data?.msg || 'Login failed. Please try again.');
       setLoading(false);
     }
   };
@@ -119,7 +109,7 @@ const LoginPage = () => {
       <div className="login-container">
         <div className="login-card">
           <Link to="/" className="back-button">← Back</Link>
-          
+
           <div className="login-logo">♻️ WasteExchange AI</div>
           <h2 className="login-title">Welcome Back</h2>
           <p className="login-subtitle">Sign in to continue trading</p>

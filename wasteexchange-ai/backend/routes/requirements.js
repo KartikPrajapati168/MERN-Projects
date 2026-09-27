@@ -3,7 +3,7 @@ const express = require('express');
 const router = express.Router();
 const Requirement = require('../models/Requirement');
 const User = require('../models/User');
-const auth = require('../middleware/auth');
+const { authMiddleware: auth } = require('../middleware/auth');
 
 // @route   POST /api/requirements
 // @desc    Buyer creates a requirement

@@ -5,7 +5,8 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const Listing = require('../models/Listing');
-const auth = require('../middleware/auth');
+const { authMiddleware } = require('../middleware/auth');
+const auth = authMiddleware;   // alias — dono kaam karenge
 const User = require('../models/User');
 const { materialClassifier } = require('../services/aiService');
 
@@ -114,13 +115,22 @@ router.post('/', auth, upload.array('images', 5), async (req, res) => {
 });
 
 // Get all active listings
-// @route   GET /api/listings (all active + pending)
+// @route   GET /api/listings (all active + pending, excluding ended biddings)
 router.get('/', async (req, res) => {
   try {
-    // ✅ Show active AND pending (only hide sold/closed)
-    const listings = await Listing.find({ 
-      status: { $in: ['active', 'pending'] }
+    const now = new Date();
+
+    const listings = await Listing.find({
+      status: { $in: ['active', 'pending'] },
+      // ✅ Exclude listings whose bidding has ENDED
+      // (biddingEnabled=true AND biddingEndsAt <= now)
+      $or: [
+        { biddingEnabled: { $ne: true } },        // no bidding
+        { biddingEndsAt: null },                  // no end date
+        { biddingEndsAt: { $gt: now } },          // bidding still running
+      ],
     }).sort({ createdAt: -1 });
+
     res.json(listings);
   } catch (err) {
     res.status(500).json({ msg: err.message });
@@ -160,8 +170,39 @@ router.delete('/:id', auth, async (req, res) => {
 // Bids received
 router.get('/bids-received', auth, async (req, res) => {
   try {
-    const listings = await Listing.find({ generatorId: req.userId, 'bids.0': { $exists: true } });
-    res.json(listings);
+    const Deal = require('../models/Deal');
+    
+    // ✅ Include ALL bidding-enabled listings (even without bids)
+    const listings = await Listing.find({ 
+      generatorId: req.userId,
+      biddingEnabled: true
+    }).sort({ createdAt: -1 });
+    
+    // Fetch all deals on these listings
+    const listingIds = listings.map(l => l._id);
+    const deals = await Deal.find({ listingId: { $in: listingIds } }).sort({ createdAt: -1 });
+    
+    // Attach direct requests to each listing
+    const result = listings.map(l => {
+      const listingDeals = deals.filter(d => String(d.listingId) === String(l._id));
+      return {
+        ...l.toObject(),
+        bids: l.bids || [],
+        requests: listingDeals.map(d => ({
+          _id: d._id,
+          buyerId: d.buyerId,
+          buyerName: d.buyerName,
+          amount: d.pricePerUnit,
+          quantity: d.quantity,
+          totalAmount: d.totalAmount,
+          status: d.status,
+          createdAt: d.createdAt,
+          initiatedBy: d.initiatedBy
+        }))
+      };
+    });
+    
+    res.json(result);
   } catch (err) { res.status(500).json({ msg: err.message }); }
 });
 
@@ -172,9 +213,30 @@ router.post('/:id/bids', auth, async (req, res) => {
     const listing = await Listing.findById(req.params.id);
     if (!listing) return res.status(404).json({ msg: 'Listing not found' });
     if (!listing.biddingEnabled) return res.status(400).json({ msg: 'Bidding not enabled' });
-    if (Number(amount) < listing.minBidPrice) {
-      return res.status(400).json({ msg: `Minimum bid is ₹${listing.minBidPrice}/kg` });
+
+    // ✅ Block if bidding time ended
+    if (listing.biddingEndsAt && new Date(listing.biddingEndsAt).getTime() <= Date.now()) {
+      return res.status(400).json({ msg: 'Bidding has ended. Cannot place new bids.' });
     }
+
+    // ✅ Block if listing closed/sold
+    if (listing.status === 'sold' || listing.status === 'closed') {
+      return res.status(400).json({ msg: 'This listing is closed.' });
+    }
+
+    // ✅ Block if bidding time ended
+if (listing.biddingEndsAt && new Date(listing.biddingEndsAt).getTime() <= Date.now()) {
+  return res.status(400).json({ msg: 'Bidding has ended. Cannot place new bids.' });
+}
+
+// ✅ Block if listing is closed
+if (listing.status === 'closed' || listing.status === 'sold') {
+  return res.status(400).json({ msg: 'This listing is closed.' });
+}
+
+if (Number(amount) < listing.minBidPrice) {
+  return res.status(400).json({ msg: `Minimum bid is ₹${listing.minBidPrice}/kg` });
+}
 
     const buyer = await User.findById(req.userId);
     const newBid = {
@@ -199,7 +261,7 @@ router.post('/:id/bids/:bidId/accept', auth, async (req, res) => {
     if (!bid) return res.status(404).json({ msg: 'Bid not found' });
 
     bid.status = 'accepted';
-    listing.status = 'sold';
+    listing.status = 'closed';   // ✅ Always 'closed' when assigned
     await listing.save();
 
     const Deal = require('../models/Deal');
@@ -234,6 +296,148 @@ router.post('/:id/bids/:bidId/reject', auth, async (req, res) => {
     if (bid) bid.status = 'rejected';
     await listing.save();
     res.json({ msg: 'Bid rejected' });
+  } catch (err) { res.status(500).json({ msg: err.message }); }
+});
+
+
+// @route   GET /api/listings/:id/my-bid
+// @desc    Get current user's bid status on this listing
+router.get('/:id/my-bid', auth, async (req, res) => {
+  try {
+    const listing = await Listing.findById(req.params.id);
+    if (!listing) return res.status(404).json({ msg: 'Listing not found' });
+
+    const allBids = listing.bids || [];
+    const sortedBids = [...allBids].filter(b => b.status !== 'rejected').sort((a, b) => b.amount - a.amount);
+    const myBid = allBids.find(b => String(b.buyerId) === String(req.userId));
+    const rank = myBid ? sortedBids.findIndex(b => b.id === myBid.id) + 1 : null;
+    const topBid = sortedBids[0] || null;
+
+    res.json({
+      myBid: myBid || null,
+      rank: rank || null,
+      topBid: topBid,
+      totalBids: sortedBids.length,
+      isEnded: listing.biddingEndsAt && new Date(listing.biddingEndsAt).getTime() <= Date.now(),
+      hasBidding: !!listing.biddingEnabled,
+      minBidPrice: listing.minBidPrice
+    });
+  } catch (err) { res.status(500).json({ msg: err.message }); }
+});
+
+// @route   PUT /api/listings/:id/bids/:bidId
+// @desc    Update/increment your bid amount
+router.put('/:id/bids/:bidId', auth, async (req, res) => {
+  try {
+    const { amount } = req.body;
+    if (!amount || Number(amount) <= 0) return res.status(400).json({ msg: 'Invalid amount' });
+
+    const listing = await Listing.findById(req.params.id);
+    if (!listing) return res.status(404).json({ msg: 'Listing not found' });
+    if (!listing.biddingEnabled) return res.status(400).json({ msg: 'Bidding not enabled' });
+
+    const isEnded = listing.biddingEndsAt && new Date(listing.biddingEndsAt).getTime() <= Date.now();
+    if (isEnded) return res.status(400).json({ msg: 'Bidding has already ended' });
+
+    if (listing.status === 'sold' || listing.status === 'closed') {
+      return res.status(400).json({ msg: 'Listing is closed' });
+    }
+
+    const bid = listing.bids.find(b => b.id === req.params.bidId);
+    if (!bid) return res.status(404).json({ msg: 'Bid not found' });
+    if (String(bid.buyerId) !== String(req.userId)) {
+      return res.status(403).json({ msg: 'Not authorized to modify this bid' });
+    }
+
+    const newAmount = Number(amount);
+    if (newAmount < listing.minBidPrice) {
+      return res.status(400).json({ msg: `Minimum bid is ₹${listing.minBidPrice}/kg` });
+    }
+
+    // Must be higher than current top bid (excluding own)
+    const otherBids = listing.bids
+      .filter(b => b.id !== bid.id && b.status !== 'rejected')
+      .sort((a, b) => b.amount - a.amount);
+    const topOther = otherBids[0];
+
+    if (topOther && newAmount <= topOther.amount) {
+      return res.status(400).json({
+        msg: `Your new bid must be higher than the current highest bid of ₹${topOther.amount}/kg`
+      });
+    }
+
+    bid.amount = newAmount;
+    bid.createdAt = new Date();
+    await listing.save();
+
+    console.log(`📈 Bid updated | ${bid.buyerName} | ${listing.material} | ₹${newAmount}/kg`);
+    res.json({ msg: 'Bid updated successfully', bid });
+  } catch (err) { res.status(500).json({ msg: err.message }); }
+});
+
+// @route   POST /api/listings/:id/bids/auto-award
+// @desc    Award listing to highest bidder after bidding ends
+router.post('/:id/bids/auto-award', auth, async (req, res) => {
+  try {
+    const listing = await Listing.findById(req.params.id);
+    if (!listing) return res.status(404).json({ msg: 'Listing not found' });
+
+    if (String(listing.generatorId) !== String(req.userId)) {
+      return res.status(403).json({ msg: 'Only the owner can award' });
+    }
+
+    if (!listing.biddingEnabled) return res.status(400).json({ msg: 'Bidding not enabled' });
+
+    const isEnded = listing.biddingEndsAt && new Date(listing.biddingEndsAt).getTime() <= Date.now();
+    if (!isEnded) return res.status(400).json({ msg: 'Bidding has not ended yet. Please wait.' });
+
+    if (listing.status === 'sold' || listing.status === 'closed') {
+      return res.status(400).json({ msg: 'Listing already awarded' });
+    }
+
+    const validBids = (listing.bids || [])
+      .filter(b => b.status !== 'rejected')
+      .sort((a, b) => b.amount - a.amount);
+    const winningBid = validBids[0];
+
+    if (!winningBid) return res.status(400).json({ msg: 'No bids to award' });
+
+    // Mark winner + reject others
+    winningBid.status = 'accepted';
+    listing.bids.forEach(b => {
+      if (b.id !== winningBid.id && b.status === 'pending') b.status = 'rejected';
+    });
+    listing.status = 'closed';   // ✅
+    await listing.save();
+
+    // Create deal
+    const Deal = require('../models/Deal');
+    const User = require('../models/User');
+    const total = listing.quantity * winningBid.amount;
+    const buyer = await User.findById(winningBid.buyerId);
+
+    const deal = new Deal({
+      listingId: listing._id,
+      generatorId: listing.generatorId,
+      generatorName: listing.generatorName,
+      buyerId: winningBid.buyerId,
+      buyerName: winningBid.buyerName || buyer?.name || 'Buyer',
+      material: listing.material,
+      quantity: listing.quantity,
+      pricePerUnit: winningBid.amount,
+      totalAmount: total,
+      buyerCommission: Math.round(total * 0.02),
+      generatorCommission: Math.round(total * 0.02),
+      platformRevenue: Math.round(total * 0.04),
+      buyerTotalPayment: Math.round(total * 1.02),
+      generatorPayout: Math.round(total * 0.98),
+      status: 'offered',
+      initiatedBy: 'generator'
+    });
+    await deal.save();
+
+    console.log(`🏆 Auto-award | ${listing.material} | Winner: ${winningBid.buyerName} | ₹${winningBid.amount}/kg`);
+    res.json({ msg: `Awarded to ${winningBid.buyerName} (₹${winningBid.amount}/kg)`, deal });
   } catch (err) { res.status(500).json({ msg: err.message }); }
 });
 

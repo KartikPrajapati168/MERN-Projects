@@ -7,6 +7,7 @@ import { wasteCategories, mainCategories } from '../utils/wasteData';
 import Chart from 'chart.js/auto';
 import 'leaflet/dist/leaflet.css';
 
+
 // ----- Helper Components -----
 const StatCard = ({ label, value, color, icon }) => (
   <div className="bd-stat-card" style={{ borderTopColor: color }}>

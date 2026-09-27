@@ -7,14 +7,12 @@ import Chart from 'chart.js/auto';
 // ✅ Helper to resolve photo URL
 const getPhotoUrl = (photo) => {
   if (!photo) return '';
-  if (photo.startsWith('http')) return photo;       // Already absolute
-  if (photo.startsWith('data:')) return photo;       // Base64
-  // Relative path - prepend backend URL
+  if (photo.startsWith('http')) return photo;
+  if (photo.startsWith('data:')) return photo;
   const backendUrl = process.env.REACT_APP_API_URL?.replace('/api', '') || 'http://localhost:5000';
   return `${backendUrl}${photo}`;
 };
 
-// ----- Small presentational helpers -----
 const KpiCard = ({ label, value, color, icon }) => (
   <div className="ad-kpi-card" style={{ borderTop: `4px solid ${color}` }}>
     <div className="ad-kpi-icon" style={{ background: color + '22', color }}>
@@ -30,6 +28,16 @@ const KpiCard = ({ label, value, color, icon }) => (
 const formatDate = (d) => {
   if (!d) return 'N/A';
   try { return new Date(d).toLocaleDateString('en-IN', { year: 'numeric', month: 'short', day: 'numeric' }); } catch { return 'N/A'; }
+};
+
+const formatDateTime = (d) => {
+  if (!d) return 'N/A';
+  try {
+    return new Date(d).toLocaleString('en-IN', {
+      year: 'numeric', month: 'short', day: 'numeric',
+      hour: '2-digit', minute: '2-digit',
+    });
+  } catch { return 'N/A'; }
 };
 
 const MAX_IMAGE_SIZE = 5 * 1024 * 1024;
@@ -76,6 +84,15 @@ const AdminDashboard = () => {
   const userChartRef = useRef(null);
   const revenueChartInstance = useRef(null);
   const userChartInstance = useRef(null);
+
+  // ✅ Contact messages
+  const [contacts, setContacts] = useState([]);
+  const [contactSearch, setContactSearch] = useState('');
+  const [contactPage, setContactPage] = useState(1);
+  const [selectedContact, setSelectedContact] = useState(null);
+  const [contactStatusFilter, setContactStatusFilter] = useState('all');
+
+  const newContactsCount = contacts.filter(c => c.status === 'new').length;
 
   const showMsg = (text, type = 'success') => {
     setMessage({ text, type });
@@ -145,50 +162,87 @@ const AdminDashboard = () => {
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
+      const withTimeout = (promise, ms = 8000) =>
+        Promise.race([
+          promise,
+          new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), ms)),
+        ]);
+
       const results = await Promise.allSettled([
-        API.get('/admin/stats'),
-        API.get('/auth/unverified-companies'),
-        API.get('/admin/users'),
-        API.get('/deals/all'),
-        API.get('/auth/profile')
+        withTimeout(API.get('/admin/stats')),
+        withTimeout(API.get('/auth/unverified-companies')),
+        withTimeout(API.get('/admin/users')),
+        withTimeout(API.get('/deals/all')),
+        withTimeout(API.get('/auth/profile')),
+        withTimeout(API.get('/contact')),
       ]);
 
+      // ✅ STATS
       if (results[0].status === 'fulfilled') {
-        setStats({ ...results[0].value.data });
+        setStats((prev) => ({ ...prev, ...results[0].value.data }));
+        console.log('✅ Stats loaded:', results[0].value.data);
       } else {
-        console.error('Stats failed:', results[0].reason);
+        console.error('❌ Stats failed:', results[0].reason?.message);
       }
 
+      // ✅ PENDING VERIFICATIONS
       if (results[1].status === 'fulfilled') {
-        const verificationsData = results[1].value.data || [];
-        setPendingVerifications(verificationsData);
-        setStats(prev => ({ ...prev, pendingVerifications: verificationsData.length }));
+        const data = results[1].value.data || [];
+        setPendingVerifications(data);
+        setStats((prev) => ({ ...prev, pendingVerifications: data.length }));
+        console.log(`✅ Verifications loaded: ${data.length}`);
       } else {
-        console.error('Verifications failed:', results[1].reason);
+        console.error('❌ Verifications failed:', results[1].reason?.message);
         setPendingVerifications([]);
       }
 
-      if (results[2].status === 'fulfilled') setAllUsers(results[2].value.data || []);
-      if (results[3].status === 'fulfilled') setAllDeals(results[3].value.data || []);
+      // ✅ ALL USERS
+      if (results[2].status === 'fulfilled') {
+        const data = results[2].value.data || [];
+        setAllUsers(data);
+        console.log(`✅ Users loaded: ${data.length}`);
+      } else {
+        console.error('❌ Users failed:', results[2].reason?.message);
+        setAllUsers([]);
+      }
 
+      // ✅ ALL DEALS
+      if (results[3].status === 'fulfilled') {
+        const data = results[3].value.data || [];
+        setAllDeals(data);
+        console.log(`✅ Deals loaded: ${data.length}`);
+      } else {
+        console.error('❌ Deals failed:', results[3].reason?.message);
+        setAllDeals([]);
+      }
+
+      // ✅ ADMIN PROFILE
       if (results[4].status === 'fulfilled') {
         const profileData = results[4].value.data || {};
         setAdminProfile(profileData);
         setAdminForm(profileData);
+        if (profileData.profilePhoto) setProfilePhoto(profileData.profilePhoto);
+        console.log('✅ Profile loaded');
+      } else {
+        console.error('❌ Profile failed:', results[4].reason?.message);
+      }
 
-        if (profileData.profilePhoto) {
-          setProfilePhoto(profileData.profilePhoto);
-
-          const currentUser = JSON.parse(localStorage.getItem('currentUser') || '{}');
-          const updatedUser = { ...currentUser, profilePhoto: profileData.profilePhoto };
-          localStorage.setItem('currentUser', JSON.stringify(updatedUser));
-          setUser(updatedUser);
-        }
+      // ✅ CONTACTS
+      if (results[5].status === 'fulfilled') {
+        const data = results[5].value.data || [];
+        setContacts(data);
+        console.log(`✅ Contacts loaded: ${data.length}`);
+      } else {
+        console.error('❌ Contacts failed:', results[5].reason?.message);
+        setContacts([]);
       }
 
     } catch (error) {
-      console.error('Unexpected error loading data:', error);
-      if (error.response?.status === 401) { localStorage.clear(); navigate('/login'); }
+      console.error('❌ Unexpected error loading data:', error);
+      if (error.response?.status === 401) {
+        localStorage.clear();
+        navigate('/login');
+      }
     } finally {
       setLoading(false);
     }
@@ -199,8 +253,14 @@ const AdminDashboard = () => {
   useEffect(() => {
     const token = localStorage.getItem('token');
     if (!token) { navigate('/login'); return; }
+
     const currentUser = JSON.parse(localStorage.getItem('currentUser') || '{}');
-    if (!currentUser || currentUser.role !== 'admin') { navigate('/login'); return; }
+
+    if (!currentUser || currentUser.role !== 'admin') {
+      navigate('/login', { replace: true });
+      return;
+    }
+
     setUser(currentUser);
     if (currentUser.profilePhoto) setProfilePhoto(currentUser.profilePhoto);
     loadData();
@@ -273,6 +333,7 @@ const AdminDashboard = () => {
   useEffect(() => { setVerificationPage(1); }, [verificationSearch]);
   useEffect(() => { setUserPage(1); }, [userSearch]);
   useEffect(() => { setDealPage(1); }, [dealSearch]);
+  useEffect(() => { setContactPage(1); }, [contactSearch, contactStatusFilter]);
 
   const filterBy = (data, term, keys) => {
     if (!term) return data;
@@ -291,6 +352,18 @@ const AdminDashboard = () => {
   const filteredDeals = filterBy(allDeals, dealSearch, ['material', 'buyerName', 'generatorName']);
   const totalDealPages = Math.ceil(filteredDeals.length / itemsPerPage);
   const paginatedDeals = filteredDeals.slice((dealPage - 1) * itemsPerPage, dealPage * itemsPerPage);
+
+  // ✅ Contact filtering
+  const filteredContacts = contacts.filter(c => {
+    const matchesSearch = !contactSearch ||
+      c.fullName?.toLowerCase().includes(contactSearch.toLowerCase()) ||
+      c.email?.toLowerCase().includes(contactSearch.toLowerCase()) ||
+      c.message?.toLowerCase().includes(contactSearch.toLowerCase());
+    const matchesStatus = contactStatusFilter === 'all' || c.status === contactStatusFilter;
+    return matchesSearch && matchesStatus;
+  });
+  const totalContactPages = Math.ceil(filteredContacts.length / itemsPerPage);
+  const paginatedContacts = filteredContacts.slice((contactPage - 1) * itemsPerPage, contactPage * itemsPerPage);
 
   const Pagination = ({ currentPage, totalPages, onPageChange }) => {
     if (totalPages <= 1) return null;
@@ -333,6 +406,38 @@ const AdminDashboard = () => {
     }
   };
 
+  // ✅ Contact handlers
+  const handleContactStatusChange = async (id, status) => {
+    try {
+      await API.put(`/contact/${id}/status`, { status });
+      setContacts(contacts.map(c => c._id === id ? { ...c, status } : c));
+      showMsg(`Marked as ${status}`);
+      if (selectedContact?._id === id) setSelectedContact({ ...selectedContact, status });
+    } catch (err) {
+      showMsg(err.response?.data?.msg || 'Failed to update', 'error');
+    }
+  };
+
+  const handleDeleteContact = async (id) => {
+    const ok = window.confirm('Delete this message permanently?');
+    if (!ok) return;
+    try {
+      await API.delete(`/contact/${id}`);
+      setContacts(contacts.filter(c => c._id !== id));
+      setSelectedContact(null);
+      showMsg('Message deleted');
+    } catch (err) {
+      showMsg(err.response?.data?.msg || 'Failed to delete', 'error');
+    }
+  };
+
+  const openContact = (contact) => {
+    setSelectedContact(contact);
+    if (contact.status === 'new') {
+      handleContactStatusChange(contact._id, 'read');
+    }
+  };
+
   const handleLogout = () => { localStorage.clear(); navigate('/login'); };
 
   const getStatusBadgeClass = (s) => ({
@@ -346,6 +451,7 @@ const AdminDashboard = () => {
     { id: 'verifications', name: 'Verifications', icon: 'user-clock', badge: pendingVerifications.length },
     { id: 'users', name: 'Users', icon: 'users' },
     { id: 'deals', name: 'Deals', icon: 'handshake' },
+    { id: 'contacts', name: 'Messages', icon: 'envelope', badge: newContactsCount },
     { id: 'analytics', name: 'Analytics', icon: 'chart-line' },
     { id: 'settings', name: 'System Settings', icon: 'cog' },
   ];
@@ -355,12 +461,101 @@ const AdminDashboard = () => {
 
   if (loading) {
     return (
-      <div className="ad-loading-container">
-        <div className="ad-loading-card">
-          <div className="ad-spinner"></div>
-          <h2>Loading Dashboard...</h2>
+      <>
+        <style>{`
+        .ad-loading-container {
+          position: fixed; inset: 0;
+          background: #0a0a0f;
+          display: flex; align-items: center; justify-content: center;
+          z-index: 99999;
+        }
+        [data-theme="light"] .ad-loading-container { background: #f8fafc; }
+
+        .ad-loading-logo-wrap { display: flex; flex-direction: column; align-items: center; gap: 20px; }
+
+        .ad-loading-logo-ring {
+          position: relative;
+          width: 120px; height: 120px;
+          display: flex; align-items: center; justify-content: center;
+        }
+        .ad-loading-logo-ring::before {
+          content: '';
+          position: absolute; inset: 0;
+          border-radius: 50%;
+          border: 3px solid transparent;
+          border-top-color: #6366f1;
+          border-right-color: #8b5cf6;
+          animation: ad-spin-ring 1.2s linear infinite;
+        }
+        .ad-loading-logo-ring::after {
+          content: '';
+          position: absolute; inset: 10px;
+          border-radius: 50%;
+          border: 2px solid transparent;
+          border-top-color: #60a5fa;
+          border-left-color: #a78bfa;
+          animation: ad-spin-ring 1.8s linear infinite reverse;
+        }
+        .ad-loading-logo-inner {
+          width: 80px; height: 80px; border-radius: 20px;
+          background: linear-gradient(135deg, #6366f1, #8b5cf6);
+          display: flex; align-items: center; justify-content: center;
+          font-size: 2.4rem; color: white;
+          box-shadow: 0 0 40px rgba(99,102,241,0.5);
+          animation: ad-logo-breathe 2s ease-in-out infinite;
+        }
+        @keyframes ad-spin-ring { to { transform: rotate(360deg); } }
+        @keyframes ad-logo-breathe {
+          0%, 100% { transform: scale(1); box-shadow: 0 0 40px rgba(99,102,241,0.5); }
+          50% { transform: scale(1.08); box-shadow: 0 0 60px rgba(99,102,241,0.8); }
+        }
+        .ad-loading-text {
+          font-size: 1.5rem; font-weight: 800;
+          background: linear-gradient(135deg, #a78bfa, #60a5fa);
+          -webkit-background-clip: text;
+          -webkit-text-fill-color: transparent;
+          background-clip: text;
+          letter-spacing: -0.5px;
+          margin: 0;
+          animation: ad-text-pulse 2s ease-in-out infinite;
+        }
+        @keyframes ad-text-pulse {
+          0%, 100% { opacity: 1; }
+          50% { opacity: 0.6; }
+        }
+        .ad-loading-tagline {
+          color: #6b7280; font-size: 0.85rem;
+          letter-spacing: 0.5px; margin-top: -12px;
+        }
+        .ad-loading-dots { display: flex; gap: 6px; margin-top: 8px; }
+        .ad-loading-dots span {
+          width: 8px; height: 8px; border-radius: 50%;
+          background: #6366f1;
+          animation: ad-dot-bounce 1.4s ease-in-out infinite;
+        }
+        .ad-loading-dots span:nth-child(2) { animation-delay: 0.2s; background: #8b5cf6; }
+        .ad-loading-dots span:nth-child(3) { animation-delay: 0.4s; background: #60a5fa; }
+        @keyframes ad-dot-bounce {
+          0%, 80%, 100% { transform: translateY(0); opacity: 0.5; }
+          40% { transform: translateY(-10px); opacity: 1; }
+        }
+      `}</style>
+
+        <div className="ad-loading-container">
+          <div className="ad-loading-logo-wrap">
+            <div className="ad-loading-logo-ring">
+              <div className="ad-loading-logo-inner">
+                <i className="fas fa-recycle"></i>
+              </div>
+            </div>
+            <h1 className="ad-loading-text">WasteExchange AI</h1>
+            <p className="ad-loading-tagline">Admin Portal</p>
+            <div className="ad-loading-dots">
+              <span></span><span></span><span></span>
+            </div>
+          </div>
         </div>
-      </div>
+      </>
     );
   }
 
@@ -523,6 +718,126 @@ const AdminDashboard = () => {
           </div>
         );
 
+      case 'contacts':
+        return (
+          <div>
+            <div className="ad-page-header">
+              <h2>Contact Messages ({filteredContacts.length})</h2>
+              <div className="ad-search">
+                <i className="fas fa-search"></i>
+                <input
+                  type="text"
+                  placeholder="Search by name, email or message..."
+                  value={contactSearch}
+                  onChange={(e) => setContactSearch(e.target.value)}
+                />
+              </div>
+            </div>
+
+            {/* Status Filter Tabs */}
+            <div className="ad-status-tabs">
+              {[
+                { key: 'all', label: 'All', color: '#6366f1' },
+                { key: 'new', label: 'New', color: '#fbbf24' },
+                { key: 'read', label: 'Read', color: '#60a5fa' },
+                { key: 'replied', label: 'Replied', color: '#22c55e' },
+                { key: 'archived', label: 'Archived', color: '#9ca3af' },
+              ].map(tab => {
+                const count = tab.key === 'all' ? contacts.length : contacts.filter(c => c.status === tab.key).length;
+                return (
+                  <button
+                    key={tab.key}
+                    className={`ad-status-tab ${contactStatusFilter === tab.key ? 'active' : ''}`}
+                    onClick={() => setContactStatusFilter(tab.key)}
+                    style={{
+                      borderColor: contactStatusFilter === tab.key ? tab.color : 'transparent',
+                      color: contactStatusFilter === tab.key ? tab.color : '#9ca3af',
+                    }}
+                  >
+                    <span className="ad-status-tab-dot" style={{ background: tab.color }} />
+                    {tab.label}
+                    <span className="ad-status-tab-count">{count}</span>
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="ad-table">
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>From</th>
+                    <th>Subject</th>
+                    <th>Message Preview</th>
+                    <th>Status</th>
+                    <th>Received</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {paginatedContacts.map(c => (
+                    <tr key={c._id} style={{ background: c.status === 'new' ? 'rgba(251,191,36,0.04)' : 'transparent' }}>
+                      <td>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                          <div className="ad-avatar-sm">{c.fullName?.charAt(0)?.toUpperCase()}</div>
+                          <div>
+                            <strong style={{ color: 'white', fontSize: '0.9rem' }}>{c.fullName}</strong>
+                            <br />
+                            <small style={{ color: '#9ca3af', fontSize: '0.75rem' }}>{c.email}</small>
+                          </div>
+                        </div>
+                      </td>
+                      <td>
+                        <span style={{
+                          background: 'rgba(99,102,241,0.15)',
+                          color: '#a78bfa',
+                          padding: '3px 10px',
+                          borderRadius: 8,
+                          fontSize: '0.72rem',
+                          fontWeight: 600,
+                          textTransform: 'capitalize',
+                        }}>
+                          {c.subject}
+                        </span>
+                      </td>
+                      <td>
+                        <small style={{ color: '#d1d5db' }}>
+                          {c.message?.length > 60 ? c.message.slice(0, 60) + '…' : c.message}
+                        </small>
+                      </td>
+                      <td>
+                        <span className={`ad-badge ${
+                          c.status === 'new' ? 'ad-status-pending' :
+                          c.status === 'read' ? 'ad-status-active' :
+                          c.status === 'replied' ? 'ad-status-closed' :
+                          'ad-status-closed'
+                        }`}>
+                          {c.status}
+                        </span>
+                      </td>
+                      <td>
+                        <small style={{ color: '#9ca3af', fontSize: '0.75rem' }}>{formatDate(c.createdAt)}</small>
+                      </td>
+                      <td>
+                        <button className="btn-sm btn-outline-primary" onClick={() => openContact(c)}>
+                          <i className="fas fa-eye"></i> View
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {paginatedContacts.length === 0 && (
+                <div className="ad-no-data-block">
+                  <i className="fas fa-envelope-open fa-3x" style={{ color: '#4b5563', marginBottom: 12 }}></i>
+                  <p>No messages found</p>
+                </div>
+              )}
+            </div>
+            <Pagination currentPage={contactPage} totalPages={totalContactPages} onPageChange={setContactPage} />
+          </div>
+        );
+
       case 'analytics':
         return (
           <div>
@@ -557,7 +872,6 @@ const AdminDashboard = () => {
               <div className="ad-settings-grid">
                 <div className="ad-profile-card">
                   <div className="ad-profile-avatar-large" onClick={() => profilePhotoInputRef.current?.click()} title="Click to update photo">
-                    {/* ✅ FIX 2: getPhotoUrl use kiya */}
                     {profilePhotoUploading ? <i className="fas fa-spinner fa-spin"></i> : profilePhoto ? <img src={getPhotoUrl(profilePhoto)} alt="Profile" /> : <span>{adminProfile.name?.charAt(0) || 'A'}</span>}
                     <span className="ad-profile-avatar-overlay"><i className="fas fa-camera"></i></span>
                   </div>
@@ -610,7 +924,6 @@ const AdminDashboard = () => {
       <div className={`ad-sidebar ${sidebarCollapsed ? 'collapsed' : ''}`}>
         <div className="ad-brand-photo">
           <div className="ad-brand-avatar" onClick={() => profilePhotoInputRef.current?.click()} title="Update photo">
-            {/* ✅ FIX 1: getPhotoUrl use kiya */}
             {profilePhotoUploading ? <i className="fas fa-spinner fa-spin"></i> : profilePhoto ? <img src={getPhotoUrl(profilePhoto)} alt="Profile" /> : <span>{adminProfile.name?.charAt(0) || user?.name?.charAt(0) || 'A'}</span>}
             <span className="ad-brand-avatar-overlay"><i className="fas fa-camera"></i></span>
           </div>
@@ -657,7 +970,7 @@ const AdminDashboard = () => {
           </div>
           <div className="ad-header-actions">
             <div className="ad-search ad-header-search"><i className="fas fa-search"></i><input type="text" placeholder="Quick search..." /></div>
-            <div className="ad-notification"><i className="fas fa-bell"></i>{pendingVerifications.length > 0 && <span className="ad-dot"></span>}</div>
+            <div className="ad-notification"><i className="fas fa-bell"></i>{(pendingVerifications.length > 0 || newContactsCount > 0) && <span className="ad-dot"></span>}</div>
             <button className="ad-logout" onClick={handleLogout}><i className="fas fa-sign-out-alt"></i> Logout</button>
           </div>
         </div>
@@ -725,6 +1038,171 @@ const AdminDashboard = () => {
                 {[['Material', selectedDeal.material], ['Quantity', `${selectedDeal.quantity} kg`], ['Total Amount', `₹${selectedDeal.totalAmount}`], ['Platform Revenue', `₹${selectedDeal.platformRevenue}`], ['Buyer', selectedDeal.buyerName || 'N/A'], ['Generator', selectedDeal.generatorName || 'N/A'], ['Status', selectedDeal.status], ['Date', formatDate(selectedDeal.createdAt)]].map(([label, val], i) => (
                   <div key={i}><small>{label}</small><p>{val}</p></div>
                 ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ✅ Contact Message Detail Modal */}
+      {selectedContact && (
+        <div className="ad-modal-overlay" onClick={() => setSelectedContact(null)}>
+          <div className="ad-modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 640 }}>
+            <div className="ad-modal-header">
+              <div>
+                <h3><i className="fas fa-envelope me-2"></i>Contact Message</h3>
+                <p style={{ color: '#9ca3af', fontSize: '0.8rem', margin: '4px 0 0' }}>
+                  Received on {formatDateTime(selectedContact.createdAt)}
+                </p>
+              </div>
+              <button onClick={() => setSelectedContact(null)} className="ad-modal-close">&times;</button>
+            </div>
+            <div className="ad-modal-body">
+              <div style={{
+                background: 'rgba(99,102,241,0.08)',
+                border: '1px solid rgba(99,102,241,0.2)',
+                borderRadius: 12,
+                padding: '16px 18px',
+                marginBottom: 20,
+                display: 'flex',
+                alignItems: 'center',
+                gap: 14,
+              }}>
+                <div style={{
+                  width: 48, height: 48, borderRadius: '50%',
+                  background: 'linear-gradient(135deg, #6366f1, #8b5cf6)',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  fontWeight: 700, color: 'white', fontSize: '1.2rem',
+                }}>
+                  {selectedContact.fullName?.charAt(0)?.toUpperCase()}
+                </div>
+                <div style={{ flex: 1 }}>
+                  <strong style={{ color: 'white', fontSize: '1rem' }}>{selectedContact.fullName}</strong>
+                  <div style={{ color: '#9ca3af', fontSize: '0.82rem', marginTop: 2 }}>
+                    <i className="fas fa-envelope me-1"></i>
+                    <a href={`mailto:${selectedContact.email}`} style={{ color: '#a78bfa', textDecoration: 'none' }}>
+                      {selectedContact.email}
+                    </a>
+                    {selectedContact.phone && (
+                      <>
+                        {' · '}
+                        <i className="fas fa-phone me-1"></i>{selectedContact.phone}
+                      </>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              <div style={{ marginBottom: 16 }}>
+                <div style={{ fontSize: '0.72rem', color: '#9ca3af', textTransform: 'uppercase', marginBottom: 6, fontWeight: 600 }}>
+                  Subject
+                </div>
+                <span style={{
+                  background: 'rgba(99,102,241,0.15)',
+                  color: '#a78bfa',
+                  padding: '6px 14px',
+                  borderRadius: 8,
+                  fontSize: '0.85rem',
+                  fontWeight: 600,
+                  textTransform: 'capitalize',
+                  display: 'inline-block',
+                }}>
+                  {selectedContact.subject}
+                </span>
+              </div>
+
+              <div style={{ marginBottom: 20 }}>
+                <div style={{ fontSize: '0.72rem', color: '#9ca3af', textTransform: 'uppercase', marginBottom: 6, fontWeight: 600 }}>
+                  Message
+                </div>
+                <div style={{
+                  background: 'rgba(255,255,255,0.03)',
+                  border: '1px solid rgba(255,255,255,0.06)',
+                  borderRadius: 10,
+                  padding: '14px 16px',
+                  color: '#d1d5db',
+                  fontSize: '0.9rem',
+                  lineHeight: 1.6,
+                  whiteSpace: 'pre-wrap',
+                }}>
+                  {selectedContact.message}
+                </div>
+              </div>
+
+              <div style={{ marginBottom: 16 }}>
+                <div style={{ fontSize: '0.72rem', color: '#9ca3af', textTransform: 'uppercase', marginBottom: 8, fontWeight: 600 }}>
+                  Status
+                </div>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  {['new', 'read', 'replied', 'archived'].map(s => (
+                    <button
+                      key={s}
+                      onClick={() => handleContactStatusChange(selectedContact._id, s)}
+                      className={`btn-sm ${selectedContact.status === s ? 'btn-outline-success' : 'btn-outline-primary'}`}
+                      style={{ textTransform: 'capitalize' }}
+                    >
+                      {selectedContact.status === s && <i className="fas fa-check me-1"></i>}
+                      {s}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+            <div style={{
+              padding: '16px 24px',
+              borderTop: '1px solid rgba(255,255,255,0.05)',
+              display: 'flex',
+              justifyContent: 'space-between',
+              gap: 10,
+            }}>
+              <button
+                onClick={() => handleDeleteContact(selectedContact._id)}
+                style={{
+                  padding: '10px 20px',
+                  borderRadius: 9,
+                  border: '1px solid rgba(248,113,113,0.3)',
+                  background: 'rgba(248,113,113,0.08)',
+                  color: '#f87171',
+                  cursor: 'pointer',
+                  fontWeight: 600,
+                  fontSize: '0.85rem',
+                }}
+              >
+                <i className="fas fa-trash me-1"></i> Delete
+              </button>
+              <div style={{ display: 'flex', gap: 10 }}>
+                <a
+                  href={`mailto:${selectedContact.email}?subject=Re: Your message to WasteExchange AI`}
+                  style={{
+                    padding: '10px 20px',
+                    borderRadius: 9,
+                    background: 'linear-gradient(135deg, #6366f1, #8b5cf6)',
+                    color: 'white',
+                    textDecoration: 'none',
+                    fontWeight: 600,
+                    fontSize: '0.85rem',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 6,
+                  }}
+                >
+                  <i className="fas fa-reply"></i> Reply via Email
+                </a>
+                <button
+                  onClick={() => setSelectedContact(null)}
+                  style={{
+                    padding: '10px 20px',
+                    borderRadius: 9,
+                    border: '1px solid rgba(255,255,255,0.1)',
+                    background: 'transparent',
+                    color: '#e5e7eb',
+                    cursor: 'pointer',
+                    fontWeight: 600,
+                    fontSize: '0.85rem',
+                  }}
+                >
+                  Close
+                </button>
               </div>
             </div>
           </div>
@@ -867,11 +1345,132 @@ const AdminDashboard = () => {
         .ad-modal-grid small { color: #9ca3af; font-weight: 500; display: block; font-size: 0.7rem; }
         .ad-modal-grid p { margin: 4px 0 0; color: #d1d5db; font-size: 0.9rem; }
         .ad-modal-footer { display: flex; gap: 12px; margin-top: 18px; }
-        .ad-loading-container { min-height: 100vh; display: flex; align-items: center; justify-content: center; background: #0a0a0f; }
-        .ad-loading-card { text-align: center; color: #9ca3af; }
-        .ad-spinner { width: 40px; height: 40px; border: 4px solid rgba(255,255,255,0.1); border-top-color: #8b5cf6; border-radius: 50%; margin: 0 auto 16px; animation: ad-spin 0.8s linear infinite; }
-        @keyframes ad-spin { to { transform: rotate(360deg); } }
         .ad-footer { margin-top: 8px; padding-top: 16px; text-align: center; font-size: 0.8rem; color: #6b7280; border-top: 1px solid rgba(255,255,255,0.05); }
+
+        /* ✅ Contact status tabs */
+        .ad-status-tabs {
+          display: flex;
+          gap: 8px;
+          margin-bottom: 18px;
+          flex-wrap: wrap;
+          padding: 6px;
+          background: rgba(255,255,255,0.03);
+          border-radius: 12px;
+          border: 1px solid rgba(255,255,255,0.05);
+          width: fit-content;
+        }
+        .ad-status-tab {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          padding: 8px 14px;
+          border-radius: 8px;
+          border: 2px solid transparent;
+          background: transparent;
+          cursor: pointer;
+          font-size: 0.8rem;
+          font-weight: 600;
+          transition: all 0.15s;
+          color: #9ca3af;
+        }
+        .ad-status-tab:hover {
+          background: rgba(255,255,255,0.04);
+        }
+        .ad-status-tab.active {
+          background: rgba(255,255,255,0.05);
+        }
+        .ad-status-tab-dot {
+          width: 7px;
+          height: 7px;
+          border-radius: 50%;
+          flex-shrink: 0;
+        }
+        .ad-status-tab-count {
+          padding: 2px 8px;
+          border-radius: 999px;
+          background: rgba(255,255,255,0.05);
+          font-size: 0.7rem;
+          font-weight: 700;
+        }
+
+        /* ✅ ROTATING LOGO LOADING ANIMATION */
+        .ad-loading-container {
+          position: fixed; inset: 0;
+          background: #0a0a0f;
+          display: flex; align-items: center; justify-content: center;
+          z-index: 99999;
+        }
+        [data-theme="light"] .ad-loading-container { background: #f8fafc; }
+
+        .ad-loading-logo-wrap { display: flex; flex-direction: column; align-items: center; gap: 20px; }
+
+        .ad-loading-logo-ring {
+          position: relative;
+          width: 120px; height: 120px;
+          display: flex; align-items: center; justify-content: center;
+        }
+        .ad-loading-logo-ring::before {
+          content: '';
+          position: absolute; inset: 0;
+          border-radius: 50%;
+          border: 3px solid transparent;
+          border-top-color: #6366f1;
+          border-right-color: #8b5cf6;
+          animation: ad-spin-ring 1.2s linear infinite;
+        }
+        .ad-loading-logo-ring::after {
+          content: '';
+          position: absolute; inset: 10px;
+          border-radius: 50%;
+          border: 2px solid transparent;
+          border-top-color: #60a5fa;
+          border-left-color: #a78bfa;
+          animation: ad-spin-ring 1.8s linear infinite reverse;
+        }
+        .ad-loading-logo-inner {
+          width: 80px; height: 80px; border-radius: 20px;
+          background: linear-gradient(135deg, #6366f1, #8b5cf6);
+          display: flex; align-items: center; justify-content: center;
+          font-size: 2.4rem; color: white;
+          box-shadow: 0 0 40px rgba(99,102,241,0.5);
+          animation: ad-logo-breathe 2s ease-in-out infinite;
+        }
+        @keyframes ad-spin-ring { to { transform: rotate(360deg); } }
+        @keyframes ad-logo-breathe {
+          0%, 100% { transform: scale(1); box-shadow: 0 0 40px rgba(99,102,241,0.5); }
+          50% { transform: scale(1.08); box-shadow: 0 0 60px rgba(99,102,241,0.8); }
+        }
+        .ad-loading-text {
+          font-size: 1.5rem; font-weight: 800;
+          background: linear-gradient(135deg, #a78bfa, #60a5fa);
+          -webkit-background-clip: text;
+          -webkit-text-fill-color: transparent;
+          background-clip: text;
+          letter-spacing: -0.5px;
+          margin: 0;
+          animation: ad-text-pulse 2s ease-in-out infinite;
+        }
+        @keyframes ad-text-pulse {
+          0%, 100% { opacity: 1; }
+          50% { opacity: 0.6; }
+        }
+        .ad-loading-tagline {
+          color: #6b7280; font-size: 0.85rem;
+          letter-spacing: 0.5px; margin-top: -12px;
+        }
+        .ad-loading-dots { display: flex; gap: 6px; margin-top: 8px; }
+        .ad-loading-dots span {
+          width: 8px; height: 8px; border-radius: 50%;
+          background: #6366f1;
+          animation: ad-dot-bounce 1.4s ease-in-out infinite;
+        }
+        .ad-loading-dots span:nth-child(2) { animation-delay: 0.2s; background: #8b5cf6; }
+        .ad-loading-dots span:nth-child(3) { animation-delay: 0.4s; background: #60a5fa; }
+        @keyframes ad-dot-bounce {
+          0%, 80%, 100% { transform: translateY(0); opacity: 0.5; }
+          40% { transform: translateY(-10px); opacity: 1; }
+        }
+
         @media (max-width: 900px) {
           .ad-kpi-grid { grid-template-columns: repeat(2, 1fr); }
           .ad-stats-row { grid-template-columns: 1fr; }

@@ -45,8 +45,14 @@ const SignupPage = () => {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+
+    // 🚫 Extra safety: block admin role
+    if (formData.role === 'admin' || !['buyer', 'generator'].includes(formData.role)) {
+      setErrors('Invalid role. Please select Buyer or Generator.');
+      return;
+    }
     if (!validate()) return;
-    
+
     setLoading(true);
     setErrors({});
 
@@ -72,7 +78,7 @@ const SignupPage = () => {
         const { token, user } = res.data;
         localStorage.setItem('token', token);
         localStorage.setItem('currentUser', JSON.stringify(user));
-        
+
         // Redirect based on role
         if (user.role === 'admin') {
           navigate('/admin');
@@ -84,19 +90,19 @@ const SignupPage = () => {
       }
     } catch (err) {
       console.error('Signup error details:', err);
-      
+
       if (err.response) {
         // Server responded with error
         console.error('Server response:', err.response.data);
-        setErrors({ 
-          general: err.response.data?.msg || 
-                   err.response.data?.message || 
-                   'Signup failed. Please try again.' 
+        setErrors({
+          general: err.response.data?.msg ||
+            err.response.data?.message ||
+            'Signup failed. Please try again.'
         });
       } else if (err.request) {
         // No response from server
-        setErrors({ 
-          general: 'Cannot connect to server. Please ensure the backend is running on port 5000.' 
+        setErrors({
+          general: 'Cannot connect to server. Please ensure the backend is running on port 5000.'
         });
         console.error('No response from server. Check if backend is running.');
       } else {
@@ -196,7 +202,6 @@ const SignupPage = () => {
               >
                 <option value="buyer">Buyer (purchase waste)</option>
                 <option value="generator">Generator (sell waste)</option>
-                <option value="admin">Admin (Platform Manager)</option>
               </select>
             </div>
 

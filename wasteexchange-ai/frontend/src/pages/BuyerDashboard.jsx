@@ -6,6 +6,9 @@ import API from '../utils/api';
 import { wasteCategories, mainCategories } from '../utils/wasteData';
 import Chart from 'chart.js/auto';
 import 'leaflet/dist/leaflet.css';
+import InsufficientBalanceModal from '../components/InsufficientBalanceModal';
+import RazorpayPaymentModal from '../components/RazorpayPaymentModal';
+import ThemeToggle from '../components/ThemeToggle';
 
 // ----- Helper Components -----
 const StatCard = ({ label, value, color, icon }) => (
@@ -16,7 +19,6 @@ const StatCard = ({ label, value, color, icon }) => (
   </div>
 );
 
-// ----- Constants -----
 const MAX_IMAGES = 5;
 const MAX_IMAGE_SIZE = 5 * 1024 * 1024;
 
@@ -29,6 +31,16 @@ const formatDate = (d) => {
   }
 };
 
+const formatDateTime = (d) => {
+  if (!d) return 'N/A';
+  try {
+    return new Date(d).toLocaleString('en-IN', {
+      year: 'numeric', month: 'short', day: 'numeric',
+      hour: '2-digit', minute: '2-digit',
+    });
+  } catch { return 'N/A'; }
+};
+
 const BuyerDashboard = () => {
   const navigate = useNavigate();
   const [user, setUser] = useState(null);
@@ -36,18 +48,15 @@ const BuyerDashboard = () => {
   const [loading, setLoading] = useState(true);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
-  // Data
   const [requirements, setRequirements] = useState([]);
   const [listings, setListings] = useState([]);
   const [deals, setDeals] = useState([]);
   const [messages, setMessages] = useState([]);
 
-  // Find Material mode
   const [findMaterialMode, setFindMaterialMode] = useState('browse');
   const [aiMatches, setAiMatches] = useState([]);
-  const [aiLoading, setAiLoading] = useState(false); // ✅ YE LINE ADD KAR
+  const [aiLoading, setAiLoading] = useState(false);
 
-  // Filters
   const [filterMaterial, setFilterMaterial] = useState('');
   const [filterLocation, setFilterLocation] = useState('');
   const [filterMinPrice, setFilterMinPrice] = useState('');
@@ -57,67 +66,109 @@ const BuyerDashboard = () => {
   const [searchTerm, setSearchTerm] = useState('');
   const [showFilterModal, setShowFilterModal] = useState(false);
   const [viewingListing, setViewingListing] = useState(null);
-  const [aiQuery, setAiQuery] = useState('');
 
-  // Pagination
+  const [balanceModal, setBalanceModal] = useState({ open: false, required: 0, available: 0, context: '' });
+  const [razorpayModal, setRazorpayModal] = useState({ open: false, deal: null });
+
   const [currentPage, setCurrentPage] = useState(1);
   const itemsPerPage = 6;
 
-  // Create requirement form
+  // ✅ Requests Sent tab state
+  const [requestsSearch, setRequestsSearch] = useState('');
+  const [requestsStatusFilter, setRequestsStatusFilter] = useState('all');
+
   const [reqForm, setReqForm] = useState({
     material: '', materialSubtype: '', minQty: '', maxQty: '', maxPrice: '', location: '', locationCoordinates: [23.0225, 72.5714],
   });
   const [reqErrors, setReqErrors] = useState({});
 
-  // Reference photos
   const [reqImages, setReqImages] = useState([]);
   const [imageError, setImageError] = useState('');
   const [imageUploading, setImageUploading] = useState(false);
   const fileInputRef = useRef(null);
 
-  // Profile photo
   const [profilePhoto, setProfilePhoto] = useState(null);
   const [profilePhotoUploading, setProfilePhotoUploading] = useState(false);
   const profilePhotoInputRef = useRef(null);
 
-  // Edit modal
   const [editingRequirement, setEditingRequirement] = useState(null);
   const [editForm, setEditForm] = useState({ material: '', materialSubtype: '', minQty: '', maxQty: '', maxPrice: '', location: '', locationCoordinates: [0, 0] });
 
-  // Add Money
   const [addMoneyAmount, setAddMoneyAmount] = useState('');
   const [addMoneyLoading, setAddMoneyLoading] = useState(false);
   const [addMoneyError, setAddMoneyError] = useState('');
 
-  // Profile
-  const [profileForm, setProfileForm] = useState({ name: '', email: '', password: '' });
+  // ✅ Extended profile form with all company fields
+  const [profileForm, setProfileForm] = useState({
+    name: '', email: '', phone: '', password: '',
+    companyName: '', companyRegistrationNo: '', gstNumber: '', panNumber: '',
+    companyAddress: '', companyCity: '', companyState: '', companyPincode: '',
+    companyCountry: 'India', website: '', yearEstablished: '',
+    businessDescription: '', companyType: 'private',
+    contactPerson: '', contactPhone: '', contactEmail: '',
+  });
   const [profileErrors, setProfileErrors] = useState({});
   const [profileLoading, setProfileLoading] = useState(false);
   const [profileEditMode, setProfileEditMode] = useState(false);
 
-  // Messages
   const [selectedConversation, setSelectedConversation] = useState(null);
   const [newMsgText, setNewMsgText] = useState('');
   const chatEndRef = useRef(null);
 
-  // Dashboard chart
   const chartRef = useRef(null);
   const chartInstanceRef = useRef(null);
 
-  // ----- Lifecycle -----
+  const [paymentChoiceModal, setPaymentChoiceModal] = useState({ open: false, deal: null, walletBalance: 0, canUseWallet: false });
+
+  const [myBids, setMyBids] = useState({});
+  const [incrementModal, setIncrementModal] = useState({ open: false, listing: null, myBid: null, topBid: null });
+  const [newBidAmount, setNewBidAmount] = useState('');
+  const [bidUpdating, setBidUpdating] = useState(false);
+  const [bidError, setBidError] = useState('');
+
+  const [walletTransactions, setWalletTransactions] = useState([]);
+
   useEffect(() => {
     const token = localStorage.getItem('token');
     if (!token) { navigate('/login'); return; }
+
     const currentUser = JSON.parse(localStorage.getItem('currentUser'));
-    if (!currentUser || currentUser.role !== 'buyer') { navigate('/login'); return; }
+    if (!currentUser) { navigate('/login'); return; }
+
+    if (currentUser.role === 'admin') { navigate('/admin'); return; }
+    if (currentUser.role !== 'buyer') { navigate('/login'); return; }
     if (!currentUser.isCompanyVerified) { navigate('/waiting'); return; }
+
     setUser(currentUser);
     if (currentUser.profilePhoto) setProfilePhoto(currentUser.profilePhoto);
-    setProfileForm({ name: currentUser.name, email: currentUser.email, password: '' });
+
+    // ✅ Prefill all profile fields from currentUser
+    setProfileForm({
+      name: currentUser.name || '',
+      email: currentUser.email || '',
+      phone: currentUser.phone || '',
+      password: '',
+      companyName: currentUser.companyName || '',
+      companyRegistrationNo: currentUser.companyRegistrationNo || '',
+      gstNumber: currentUser.gstNumber || '',
+      panNumber: currentUser.panNumber || '',
+      companyAddress: currentUser.companyAddress || '',
+      companyCity: currentUser.companyCity || '',
+      companyState: currentUser.companyState || '',
+      companyPincode: currentUser.companyPincode || '',
+      companyCountry: currentUser.companyCountry || 'India',
+      website: currentUser.website || '',
+      yearEstablished: currentUser.yearEstablished || '',
+      businessDescription: currentUser.businessDescription || '',
+      companyType: currentUser.companyType || 'private',
+      contactPerson: currentUser.contactPerson || '',
+      contactPhone: currentUser.contactPhone || '',
+      contactEmail: currentUser.contactEmail || '',
+    });
+
     fetchData();
   }, [navigate]);
 
-  // ✅ Add this helper
   const currentUserId = String(user?._id || user?.id || '');
 
   const fetchData = async () => {
@@ -128,22 +179,60 @@ const BuyerDashboard = () => {
         API.get('/deals/user'),
       ]);
       setRequirements(reqRes.data);
-      /*setListings(listingsRes.data.filter(l => l.status === 'active'));*/setListings(listingsRes.data);
+      setListings(listingsRes.data);
       setDeals(dealsRes.data);
+      fetchMyBids(listingsRes.data);
       const msgRes = await API.get('/messages/user');
       setMessages(msgRes.data);
+      // ✅ ADD: Fetch wallet transactions
+      try {
+        const txRes = await API.get('/wallet/transactions');
+        setWalletTransactions(txRes.data || []);
+        console.log('📊 Wallet transactions:', txRes.data?.length || 0);
+      } catch (e) {
+        console.warn('Wallet transactions fetch failed:', e.message);
+        setWalletTransactions([]);
+      }
     } catch (err) { console.error(err); }
     finally { setLoading(false); }
   };
 
-  // ✅ NEW: Fetch AI Matches from Backend
+  const fetchMyBids = async (listingsData) => {
+    const biddingListings = (listingsData || []).filter(l => l.biddingEnabled);
+    if (biddingListings.length === 0) return;
+
+    try {
+      const results = await Promise.allSettled(
+        biddingListings.map(l => API.get(`/listings/${l._id}/my-bid`))
+      );
+
+      const newMyBids = {};
+      results.forEach((res, idx) => {
+        if (res.status === 'fulfilled' && res.value.data?.myBid) {
+          newMyBids[biddingListings[idx]._id] = res.value.data;
+        }
+      });
+      setMyBids(newMyBids);
+    } catch (err) {
+      console.error('fetchMyBids error:', err);
+    }
+  };
+
   const fetchAIMatches = async () => {
     try {
       setAiLoading(true);
-      console.log('🤖 Fetching AI matches for role:', user?.role);
       const res = await API.post('/ai/recommend', { role: user?.role });
-      console.log('✅ AI matches received:', res.data?.length || 0);
-      setAiMatches(res.data || []);
+      let data = res.data || [];
+
+      // ✅ Filter out listings whose bidding has ENDED
+      const now = Date.now();
+      data = data.filter((item) => {
+        if (!item.biddingEnabled) return true;
+        if (!item.biddingEndsAt) return true;
+        return new Date(item.biddingEndsAt).getTime() > now;
+      });
+
+      setAiMatches(data);
     } catch (err) {
       console.error('❌ AI Match failed:', err.response?.data?.msg || err.message);
       setAiMatches([]);
@@ -152,22 +241,32 @@ const BuyerDashboard = () => {
     }
   };
 
-  // ✅ NEW: Trigger AI fetch when tab changes to 'ai'
   useEffect(() => {
     if (findMaterialMode === 'ai' && user) {
       fetchAIMatches();
     }
   }, [findMaterialMode, user]);
 
-  // ----- Stats -----
   const totalRequirements = requirements.length;
   const activeRequirements = requirements.filter(r => r.status === 'open').length;
-  const pendingDeals = deals.filter(d => String(d.buyerId) === currentUserId && d.status === 'requested').length;
-  const acceptedDeals = deals.filter(d => String(d.buyerId) === currentUserId && d.status === 'accepted').length;
-  const completedDeals = deals.filter(d => String(d.buyerId) === currentUserId && d.status === 'completed').length;
+  const pendingDeals = deals.filter(d =>
+    String(d.buyerId) === currentUserId &&
+    (d.status === 'requested' || d.status === 'offered')
+  ).length;
+  const acceptedDeals = deals.filter(d =>
+    String(d.buyerId) === currentUserId && d.status === 'accepted'
+  ).length;
+  const completedDeals = deals.filter(d =>
+    String(d.buyerId) === currentUserId && d.status === 'completed'
+  ).length;
   const unreadCount = messages.filter(m => m.is_read === false).length;
 
-  // ----- Dashboard donut chart -----
+  // ✅ Requests Sent calculations
+  const sentRequestsList = deals.filter(d =>
+    String(d.buyerId) === currentUserId && d.initiatedBy === 'buyer'
+  );
+  const sentRequestsCount = sentRequestsList.length;
+
   useEffect(() => {
     if (activeTab !== 'dashboard') return;
     const timer = setTimeout(() => {
@@ -182,7 +281,7 @@ const BuyerDashboard = () => {
       chartInstanceRef.current = new Chart(ctx, {
         type: 'doughnut',
         data: {
-          labels: ['Pending', 'Accepted', 'Completed'],
+          labels: ['Requested (Waiting)', 'Accepted (Paid)', 'Completed (Delivered)'],
           datasets: [{
             data: hasData ? [pendingDeals, acceptedDeals, completedDeals] : [1, 1, 1],
             backgroundColor: ['#fbbf24', '#60a5fa', '#22c55e'],
@@ -219,10 +318,45 @@ const BuyerDashboard = () => {
   }, [selectedConversation, messages]);
 
   const acceptOffer = async (dealId) => {
+    const deal = deals.find(d => d._id === dealId);
+    if (!deal) return;
+    setPaymentChoiceModal({
+      open: true,
+      deal,
+      walletBalance: user?.walletBalance || 0,
+      canUseWallet: (user?.walletBalance || 0) >= deal.buyerTotalPayment
+    });
+  };
+
+  const payViaWallet = async (deal) => {
     try {
-      const res = await API.put(`/deals/${dealId}/accept`);
+      setPaymentChoiceModal({ open: false, deal: null, walletBalance: 0, canUseWallet: false });
+      const res = await API.put(`/deals/${deal._id}/accept`);
+      setDeals(deals.map(d => d._id === deal._id ? res.data : d));
+      try {
+        const meRes = await API.get('/auth/me');
+        if (meRes.data?.user) {
+          const u = { ...user, walletBalance: meRes.data.user.walletBalance };
+          localStorage.setItem('currentUser', JSON.stringify(u));
+          setUser(u);
+        }
+      } catch (e) { }
+      alert(`✅ Deal accepted!\n\n₹${deal.buyerTotalPayment.toLocaleString('en-IN')} deducted from wallet.`);
+      await fetchData();
+    } catch (err) {
+      alert('❌ Failed: ' + (err.response?.data?.msg || err.message));
+    }
+  };
+
+  const markReceived = async (dealId) => {
+    if (!window.confirm(
+      `Mark this deal as RECEIVED?\n\n` +
+      `Confirm only after you have received the material from the generator.`
+    )) return;
+    try {
+      const res = await API.put(`/deals/${dealId}/complete`);
       setDeals(deals.map(d => d._id === dealId ? res.data : d));
-      alert('✅ Offer accepted! Deal confirmed.');
+      alert('✅ Deal completed! You have received the material.');
       await fetchData();
     } catch (err) {
       alert('❌ Failed: ' + (err.response?.data?.msg || err.message));
@@ -230,7 +364,7 @@ const BuyerDashboard = () => {
   };
 
   const rejectOffer = async (dealId) => {
-    if (!window.confirm('Reject this offer?')) return;
+    if (!window.confirm('Reject this offer? The listing will be available again.')) return;
     try {
       const res = await API.put(`/deals/${dealId}/reject`);
       setDeals(deals.map(d => d._id === dealId ? res.data : d));
@@ -241,9 +375,18 @@ const BuyerDashboard = () => {
     }
   };
 
-  // ----- Filter Logic -----
   const applyFilters = () => {
     let filtered = listings;
+
+    // ✅ 1. Exclude listings whose bidding has already ended
+    const now = Date.now();
+    filtered = filtered.filter((l) => {
+      if (!l.biddingEnabled) return true;           // no bidding → show
+      if (!l.biddingEndsAt) return true;            // no end date → show
+      return new Date(l.biddingEndsAt).getTime() > now;  // show only if still running
+    });
+
+    // ✅ 2. Apply other filters
     if (searchTerm) filtered = filtered.filter(l => l.material.toLowerCase().includes(searchTerm.toLowerCase()));
     if (filterMaterial) filtered = filtered.filter(l => l.material.toLowerCase().includes(filterMaterial.toLowerCase()));
     if (filterLocation) filtered = filtered.filter(l => l.location.toLowerCase().includes(filterLocation.toLowerCase()));
@@ -263,11 +406,21 @@ const BuyerDashboard = () => {
   const totalPages = Math.ceil(filteredListings.length / itemsPerPage) || 1;
   const currentListings = filteredListings.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage);
 
+  // ✅ Filtered requests sent
+  const filteredSentRequests = sentRequestsList
+    .filter(r => {
+      const matchesSearch = !requestsSearch ||
+        r.material?.toLowerCase().includes(requestsSearch.toLowerCase()) ||
+        r.generatorName?.toLowerCase().includes(requestsSearch.toLowerCase());
+      const matchesStatus = requestsStatusFilter === 'all' || r.status === requestsStatusFilter;
+      return matchesSearch && matchesStatus;
+    })
+    .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+
   const goToPage = (page) => {
     if (page >= 1 && page <= totalPages) setCurrentPage(page);
   };
 
-  // ----- Image upload -----
   const readFileAsDataURL = (file) =>
     new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -318,7 +471,6 @@ const BuyerDashboard = () => {
     setImageError('');
   };
 
-  // ----- Profile photo -----
   const handleProfilePhotoChange = async (e) => {
     const file = e.target.files?.[0];
     e.target.value = '';
@@ -346,7 +498,6 @@ const BuyerDashboard = () => {
     }
   };
 
-  // ----- CRUD -----
   const validateRequirement = () => {
     const err = {};
     if (!reqForm.material.trim()) err.material = 'Required';
@@ -455,58 +606,156 @@ const BuyerDashboard = () => {
 
   const sendRequest = async (listingId) => {
     try {
+      const listing = listings.find(l => l._id === listingId);
+      if (!listing) { alert('Listing not found'); return; }
+
+      const total = listing.quantity * listing.price;
+      const buyerTotalPayment = Math.round(total * 1.02);
+      const wallet = user?.walletBalance || 0;
+
+      if (wallet < buyerTotalPayment) {
+        setBalanceModal({
+          open: true,
+          required: buyerTotalPayment,
+          available: wallet,
+          context: `Request for ${listing.material} (${listing.quantity}kg)`
+        });
+        setViewingListing(null);
+        return;
+      }
+
       const res = await API.post('/deals', { listingId });
       setDeals([...deals, res.data]);
       setListings(listings.map(l => l._id === listingId ? { ...l, status: 'pending' } : l));
-      alert('✅ Request sent to Generator!');
+      alert(`✅ Request sent!\n\n₹${buyerTotalPayment.toLocaleString('en-IN')} will be transferred once the deal is accepted.`);
       setViewingListing(null);
     } catch (err) {
-      alert('❌ Failed: ' + (err.response?.data?.msg || err.message));
+      const errData = err.response?.data;
+      if (errData?.code === 'INSUFFICIENT_BALANCE') {
+        setBalanceModal({
+          open: true, required: errData.required, available: errData.current,
+          context: 'Insufficient balance to send request'
+        });
+      } else {
+        alert('❌ Failed: ' + (errData?.msg || err.message));
+      }
     }
   };
 
-  // ----- Add Money -----
+  const placeBid = async (listing, amount) => {
+    try {
+      setBidUpdating(true);
+      await API.post(`/listings/${listing._id}/bids`, { amount: Number(amount) });
+      const res = await API.get(`/listings/${listing._id}/my-bid`);
+      setMyBids(prev => ({ ...prev, [listing._id]: res.data }));
+      alert(`✅ Bid placed: ₹${amount}/kg`);
+      setIncrementModal({ open: false, listing: null, myBid: null, topBid: null });
+      setNewBidAmount('');
+      setBidError('');
+    } catch (err) {
+      setBidError(err.response?.data?.msg || err.message);
+    } finally {
+      setBidUpdating(false);
+    }
+  };
+
+  const updateBid = async (listing, bidId, newAmount) => {
+    try {
+      setBidUpdating(true);
+      await API.put(`/listings/${listing._id}/bids/${bidId}`, { amount: Number(newAmount) });
+      const res = await API.get(`/listings/${listing._id}/my-bid`);
+      setMyBids(prev => ({ ...prev, [listing._id]: res.data }));
+      alert(`✅ Bid updated: ₹${newAmount}/kg`);
+      setIncrementModal({ open: false, listing: null, myBid: null, topBid: null });
+      setNewBidAmount('');
+      setBidError('');
+    } catch (err) {
+      setBidError(err.response?.data?.msg || err.message);
+    } finally {
+      setBidUpdating(false);
+    }
+  };
+
+  const openIncrementModal = (listing) => {
+    const bidInfo = myBids[listing._id];
+    if (!bidInfo) {
+      setIncrementModal({ open: true, listing, myBid: null, topBid: null });
+      setNewBidAmount(String(listing.minBidPrice || listing.price || ''));
+    } else {
+      const suggested = bidInfo.topBid
+        ? Math.max(bidInfo.topBid.amount + 1, (bidInfo.myBid?.amount || 0) + 1)
+        : (listing.minBidPrice || listing.price);
+      setIncrementModal({ open: true, listing, myBid: bidInfo.myBid, topBid: bidInfo.topBid });
+      setNewBidAmount(String(suggested));
+    }
+    setBidError('');
+  };
+
   const handleAddMoney = async () => {
     if (!addMoneyAmount || Number(addMoneyAmount) <= 0) { setAddMoneyError('Enter a valid amount'); return; }
     const amount = Number(addMoneyAmount);
     if (amount > 100000) { setAddMoneyError('Daily limit for buyers is ₹100,000'); return; }
-    setAddMoneyLoading(true);
+    setRazorpayModal({ open: true, deal: null, mode: 'wallet_topup', amount: amount });
     setAddMoneyError('');
-    try {
-      const res = await API.post('/wallet/add-money', { amount });
-      const updatedUser = { ...user, walletBalance: res.data.newBalance };
-      localStorage.setItem('currentUser', JSON.stringify(updatedUser));
-      setUser(updatedUser);
-      setAddMoneyAmount('');
-      alert(`✅ Added ₹${amount}. New balance: ₹${res.data.newBalance}`);
-    } catch (err) {
-      setAddMoneyError(err.response?.data?.msg || 'Failed to add money');
-    } finally {
-      setAddMoneyLoading(false);
-    }
   };
 
-  // ----- Profile -----
+  // ✅ Extended profile update - sends all fields
   const handleProfileUpdate = async (e) => {
     e.preventDefault();
     const err = {};
-    if (!profileForm.name.trim()) err.name = 'Name is required';
-    if (!profileForm.email.trim()) err.email = 'Email is required';
+    if (!profileForm.name?.trim()) err.name = 'Name is required';
+    if (!profileForm.email?.trim()) err.email = 'Email is required';
     else if (!/\S+@\S+\.\S+/.test(profileForm.email)) err.email = 'Invalid email';
     if (profileForm.password && profileForm.password.length < 6) err.password = 'Password must be at least 6 characters';
     setProfileErrors(err);
     if (Object.keys(err).length > 0) return;
+
     setProfileLoading(true);
     try {
-      const payload = { name: profileForm.name, email: profileForm.email };
-      if (profileForm.password) payload.password = profileForm.password;
+      const payload = {
+        name: profileForm.name,
+        email: profileForm.email,
+        phone: profileForm.phone,
+        companyName: profileForm.companyName,
+        companyRegistrationNo: profileForm.companyRegistrationNo,
+        gstNumber: profileForm.gstNumber,
+        panNumber: profileForm.panNumber,
+        companyAddress: profileForm.companyAddress,
+        companyCity: profileForm.companyCity,
+        companyState: profileForm.companyState,
+        companyPincode: profileForm.companyPincode,
+        companyCountry: profileForm.companyCountry,
+        website: profileForm.website,
+        yearEstablished: profileForm.yearEstablished ? parseInt(profileForm.yearEstablished) : null,
+        businessDescription: profileForm.businessDescription,
+        companyType: profileForm.companyType,
+        contactPerson: profileForm.contactPerson,
+        contactPhone: profileForm.contactPhone,
+        contactEmail: profileForm.contactEmail,
+      };
+
+      const passwordChanged = !!profileForm.password;
+      if (passwordChanged) payload.password = profileForm.password;
+
       const res = await API.put('/auth/profile', payload);
-      const updatedUser = { ...user, name: res.data.name, email: res.data.email };
+      const updatedUser = { ...user, ...res.data };
       localStorage.setItem('currentUser', JSON.stringify(updatedUser));
       setUser(updatedUser);
-      setProfileForm({ ...profileForm, password: '' });
+      setProfileForm(prev => ({ ...prev, ...res.data, password: '' }));
       setProfileEditMode(false);
-      alert('✅ Profile updated!');
+
+      // ✅ If password or email changed → force re-login
+      const emailChanged = res.data.email !== user.email;
+      if (passwordChanged || emailChanged) {
+        alert(
+          `✅ Profile updated!\n\n` +
+          `Email/Password was changed. Please login again with new credentials.`
+        );
+        localStorage.clear();
+        navigate('/login');
+      } else {
+        alert('✅ Profile updated!');
+      }
     } catch (err) {
       alert('❌ Failed: ' + (err.response?.data?.msg || err.message));
     } finally {
@@ -514,12 +763,28 @@ const BuyerDashboard = () => {
     }
   };
 
-  // ----- Messages -----
-  // const conversationPartners = Array.from(new Set(messages.map(m => m.senderName).filter(Boolean)));
-  const conversationPartners = Array.from(new Set(
-    messages.map(m => m.senderName === user?.name ? m.receiverName : m.senderName)
-      .filter(name => name && name !== user?.name)
-  ));
+  const conversationPartners = (() => {
+    const myName = (user?.name || '').toLowerCase().trim();
+    if (!myName) return [];
+
+    const partnerSet = new Set();
+
+    messages.forEach(m => {
+      const sender = (m.senderName || '').toLowerCase().trim();
+      const receiver = (m.receiverName || '').toLowerCase().trim();
+
+      // If I sent this message, partner is receiver
+      if (sender === myName && m.receiverName) {
+        partnerSet.add(m.receiverName);
+      }
+      // If I received this message, partner is sender
+      else if (receiver === myName && m.senderName) {
+        partnerSet.add(m.senderName);
+      }
+    });
+
+    return Array.from(partnerSet);
+  })();
 
   const sendChatMessage = async () => {
     if (!newMsgText.trim() || !selectedConversation) return;
@@ -538,10 +803,12 @@ const BuyerDashboard = () => {
 
   const pendingOffersCount = deals.filter(d => String(d.buyerId) === currentUserId && d.status === 'offered').length;
 
+  // ✅ Sidebar with new "Requests Sent" tab
   const sidebarItems = [
     { id: 'dashboard', label: 'Dashboard', icon: 'tachometer-alt' },
     { id: 'requirements', label: 'My Requirements', icon: 'file-alt', badge: requirements.length },
     { id: 'findMaterial', label: 'Find Material', icon: 'search' },
+    { id: 'requestsSent', label: 'Requests Sent', icon: 'paper-plane', badge: sentRequestsCount },
     { id: 'deals', label: 'Deals', icon: 'handshake', badge: pendingOffersCount },
     { id: 'messages', label: 'Messages', icon: 'comments', badge: unreadCount },
     { id: 'addMoney', label: 'Add Money', icon: 'wallet' },
@@ -552,6 +819,7 @@ const BuyerDashboard = () => {
     dashboard: 'Buyer Dashboard',
     requirements: 'My Requirements',
     findMaterial: 'Find Material',
+    requestsSent: 'Requests Sent to Generators',
     create: 'Create Requirement',
     deals: 'Deals & Offers',
     messages: 'Messages & Updates',
@@ -562,6 +830,7 @@ const BuyerDashboard = () => {
     dashboard: 'tachometer-alt',
     requirements: 'file-alt',
     findMaterial: 'search',
+    requestsSent: 'paper-plane',
     create: 'plus-circle',
     deals: 'handshake',
     messages: 'comments',
@@ -573,7 +842,6 @@ const BuyerDashboard = () => {
   const getReqStatusBadgeClass = (s) => (s === 'open' ? 'bd-status-open' : s === 'matched' ? 'bd-status-matched' : 'bd-status-closed');
   const getReqStatusText = (s) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : 'Unknown');
 
-  // ----- Render -----
   const renderContent = () => {
     switch (activeTab) {
       case 'dashboard':
@@ -724,9 +992,16 @@ const BuyerDashboard = () => {
                       <div key={l._id} className="bd-material-card">
                         <div className="bd-material-card-header">
                           <div className="bd-material-card-icon"><i className="fas fa-recycle"></i></div>
-                          <div>
+                          <div style={{ flex: 1, minWidth: 0 }}>
                             <h6>{l.material}</h6>
-                            <span className="bd-badge-verified">✓ Active</span>
+                            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 3 }}>
+                              <span className="bd-badge-verified">✓ Active</span>
+                              {l.generatorName && (
+                                <span style={{ background: 'rgba(99,102,241,0.15)', color: '#a78bfa', padding: '2px 8px', borderRadius: 8, fontSize: '0.6rem', fontWeight: 600 }}>
+                                  <i className="fas fa-user me-1" style={{ fontSize: '0.5rem' }}></i>{l.generatorName}
+                                </span>
+                              )}
+                            </div>
                           </div>
                         </div>
                         {l.materialSubtype && <p className="bd-material-card-sub"><i className="fas fa-tag me-1"></i>{l.materialSubtype}</p>}
@@ -735,9 +1010,57 @@ const BuyerDashboard = () => {
                           <div className="bd-stat-row"><span>Quantity:</span><strong>{l.quantity} kg</strong></div>
                           <div className="bd-stat-row"><span>Price:</span><strong style={{ color: '#22c55e' }}>₹{l.price}/kg</strong></div>
                         </div>
+                        {l.biddingEnabled && (() => {
+                          const bidInfo = myBids[l._id];
+                          if (!bidInfo?.myBid) return null;
+                          const rank = bidInfo.rank;
+                          const isLeading = rank === 1;
+                          return (
+                            <div style={{
+                              background: isLeading ? 'rgba(34,197,94,0.12)' : 'rgba(251,191,36,0.12)',
+                              border: `1px solid ${isLeading ? 'rgba(34,197,94,0.3)' : 'rgba(251,191,36,0.3)'}`,
+                              borderRadius: 8, padding: '8px 12px', marginTop: 8, marginBottom: 8,
+                              fontSize: '0.75rem', color: isLeading ? '#22c55e' : '#fbbf24',
+                              display: 'flex', justifyContent: 'space-between', alignItems: 'center'
+                            }}>
+                              <span>
+                                <i className={`fas fa-${isLeading ? 'crown' : 'chart-line'} me-1`}></i>
+                                Your Bid: <strong>₹{bidInfo.myBid.amount}/kg</strong>
+                              </span>
+                              <span style={{
+                                background: isLeading ? 'rgba(34,197,94,0.2)' : 'rgba(251,191,36,0.2)',
+                                padding: '2px 8px', borderRadius: 12, fontWeight: 700, fontSize: '0.68rem'
+                              }}>
+                                {isLeading ? '🏆 Highest' : `Rank #${rank}`}
+                              </span>
+                            </div>
+                          );
+                        })()}
+
                         <div className="bd-material-card-actions">
                           <button className="bd-btn-outline-sm" onClick={() => setViewingListing(l)}>Details</button>
-                          <button className="bd-btn-request" onClick={() => sendRequest(l._id)}>Request</button>
+                          {l.biddingEnabled ? (
+                            (() => {
+                              const bidInfo = myBids[l._id];
+                              const hasBid = !!bidInfo?.myBid;
+                              const isLeading = bidInfo?.rank === 1;
+
+                              if (isLeading) {
+                                return (
+                                  <button className="bd-btn-request" style={{ background: 'rgba(34,197,94,0.15)', cursor: 'default' }} disabled>
+                                    <i className="fas fa-crown"></i> Leading
+                                  </button>
+                                );
+                              }
+                              return (
+                                <button className="bd-btn-request" style={{ background: 'rgba(251,191,36,0.15)', color: '#fbbf24', borderColor: 'rgba(251,191,36,0.3)' }} onClick={() => openIncrementModal(l)}>
+                                  <i className="fas fa-gavel"></i> {hasBid ? 'Increase Bid' : 'Place Bid'}
+                                </button>
+                              );
+                            })()
+                          ) : (
+                            <button className="bd-btn-request" onClick={() => sendRequest(l._id)}>Request</button>
+                          )}
                         </div>
                       </div>
                     ))}
@@ -781,16 +1104,12 @@ const BuyerDashboard = () => {
                     {requirements.length === 0 ? (
                       <>
                         <p>No AI recommendations yet. Create a requirement first.</p>
-                        <button className="bd-btn-primary bd-btn-sm" onClick={() => setActiveTab('create')}>
-                          Create Requirement
-                        </button>
+                        <button className="bd-btn-primary bd-btn-sm" onClick={() => setActiveTab('create')}>Create Requirement</button>
                       </>
                     ) : listings.length === 0 ? (
                       <>
                         <p>Your requirement is ready, but there are no listings on the platform yet.</p>
-                        <p style={{ fontSize: '0.8rem', color: '#6b7280' }}>
-                          Wait for generators to list materials, or check the Browse Listings tab.
-                        </p>
+                        <p style={{ fontSize: '0.8rem', color: '#6b7280' }}>Wait for generators to list materials, or check the Browse Listings tab.</p>
                       </>
                     ) : (
                       <>
@@ -813,13 +1132,19 @@ const BuyerDashboard = () => {
                           <div className="bd-ai-rank-badge" style={{ background: bc }}>#{idx + 1} Match</div>
                           <div className="bd-material-card-header">
                             <div className="bd-material-card-icon"><i className="fas fa-recycle"></i></div>
-                            <div>
+                            <div style={{ flex: 1, minWidth: 0 }}>
                               <h6>{item.material}</h6>
-                              <span className="bd-badge-verified">✓ Active</span>
+                              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 3 }}>
+                                <span className="bd-badge-verified">✓ Active</span>
+                                {item.generatorName && (
+                                  <span style={{ background: 'rgba(99,102,241,0.15)', color: '#a78bfa', padding: '2px 8px', borderRadius: 8, fontSize: '0.6rem', fontWeight: 600 }}>
+                                    <i className="fas fa-user me-1" style={{ fontSize: '0.5rem' }}></i>{item.generatorName}
+                                  </span>
+                                )}
+                              </div>
                             </div>
                           </div>
 
-                          {/* AI Score display */}
                           <div className="bd-ai-score-grid">
                             <div className="bd-ai-score-box" style={{ background: 'rgba(34,197,94,0.12)' }}>
                               <div className="bd-ai-score-num" style={{ color: '#22c55e' }}>{item.matchScore}%</div>
@@ -831,7 +1156,6 @@ const BuyerDashboard = () => {
                             </div>
                           </div>
 
-                          {/* Breakdown - AI transparency (Netflix-style "because you watched...") */}
                           <div style={{ background: 'rgba(255,255,255,0.02)', padding: 8, borderRadius: 6, marginBottom: 8 }}>
                             <div style={{ fontSize: '0.65rem', color: '#6b7280', marginBottom: 4 }}>Score Breakdown:</div>
                             <div className="bd-stat-row" style={{ fontSize: '0.7rem' }}>
@@ -842,7 +1166,6 @@ const BuyerDashboard = () => {
                             </div>
                           </div>
 
-                          {/* AI Explanation */}
                           {item.aiExplanation && item.aiExplanation.length > 0 && (
                             <div style={{ fontSize: '0.7rem', color: '#a78bfa', marginBottom: 8 }}>
                               <i className="fas fa-lightbulb me-1"></i>
@@ -853,9 +1176,81 @@ const BuyerDashboard = () => {
                           <p className="bd-material-card-sub">
                             <i className="fas fa-map-marker-alt me-1"></i>{item.location} | {item.quantity}kg
                           </p>
+
+                          {/* ✅ BID STATUS CHIP (if bidding enabled and user has placed bid) */}
+                          {item.biddingEnabled && (() => {
+                            const bidInfo = myBids[item._id];
+                            if (!bidInfo?.myBid) return null;
+                            const rank = bidInfo.rank;
+                            const isLeading = rank === 1;
+                            return (
+                              <div style={{
+                                background: isLeading ? 'rgba(34,197,94,0.12)' : 'rgba(251,191,36,0.12)',
+                                border: `1px solid ${isLeading ? 'rgba(34,197,94,0.3)' : 'rgba(251,191,36,0.3)'}`,
+                                borderRadius: 8,
+                                padding: '8px 12px',
+                                marginTop: 8,
+                                marginBottom: 8,
+                                fontSize: '0.75rem',
+                                color: isLeading ? '#22c55e' : '#fbbf24',
+                                display: 'flex',
+                                justifyContent: 'space-between',
+                                alignItems: 'center',
+                              }}>
+                                <span>
+                                  <i className={`fas fa-${isLeading ? 'crown' : 'chart-line'} me-1`}></i>
+                                  Your Bid: <strong>₹{bidInfo.myBid.amount}/kg</strong>
+                                </span>
+                                <span style={{
+                                  background: isLeading ? 'rgba(34,197,94,0.2)' : 'rgba(251,191,36,0.2)',
+                                  padding: '2px 8px',
+                                  borderRadius: 12,
+                                  fontWeight: 700,
+                                  fontSize: '0.68rem',
+                                }}>
+                                  {isLeading ? '🏆 Highest' : `Rank #${rank}`}
+                                </span>
+                              </div>
+                            );
+                          })()}
+
+                          {/* ✅ CONDITIONAL ACTION — Bid for bidding-enabled, Request otherwise */}
                           <div className="bd-material-card-actions">
                             <button className="bd-btn-outline-sm" onClick={() => setViewingListing(item)}>Details</button>
-                            <button className="bd-btn-request" onClick={() => sendRequest(item._id)}>Request</button>
+                            {item.biddingEnabled ? (
+                              (() => {
+                                const bidInfo = myBids[item._id];
+                                const hasBid = !!bidInfo?.myBid;
+                                const isLeading = bidInfo?.rank === 1;
+
+                                if (isLeading) {
+                                  return (
+                                    <button
+                                      className="bd-btn-request"
+                                      style={{ background: 'rgba(34,197,94,0.15)', cursor: 'default' }}
+                                      disabled
+                                    >
+                                      <i className="fas fa-crown"></i> Leading
+                                    </button>
+                                  );
+                                }
+                                return (
+                                  <button
+                                    className="bd-btn-request"
+                                    style={{
+                                      background: 'rgba(251,191,36,0.15)',
+                                      color: '#fbbf24',
+                                      borderColor: 'rgba(251,191,36,0.3)',
+                                    }}
+                                    onClick={() => openIncrementModal(item)}
+                                  >
+                                    <i className="fas fa-gavel"></i> {hasBid ? 'Increase Bid' : 'Place Bid'}
+                                  </button>
+                                );
+                              })()
+                            ) : (
+                              <button className="bd-btn-request" onClick={() => sendRequest(item._id)}>Request</button>
+                            )}
                           </div>
                         </div>
                       );
@@ -906,6 +1301,165 @@ const BuyerDashboard = () => {
             )}
           </div>
         );
+
+      // ✅ NEW: Requests Sent Tab
+      case 'requestsSent': {
+        const statusTabs = [
+          { key: 'all', label: 'All', color: '#6366f1' },
+          { key: 'requested', label: 'Requested', color: '#fbbf24' },
+          { key: 'accepted', label: 'Accepted', color: '#22c55e' },
+          { key: 'completed', label: 'Completed', color: '#a78bfa' },
+          { key: 'rejected', label: 'Rejected', color: '#f87171' },
+        ];
+
+        return (
+          <div className="bd-requests-sent">
+            <div className="bd-page-header">
+              <h2>📤 Requests Sent to Generators ({filteredSentRequests.length})</h2>
+              <div className="bd-search-bar" style={{ margin: 0, minWidth: 260 }}>
+                <input
+                  type="text"
+                  placeholder="Search by material or generator..."
+                  value={requestsSearch}
+                  onChange={(e) => setRequestsSearch(e.target.value)}
+                />
+              </div>
+            </div>
+
+            {/* Status Filter Tabs */}
+            <div className="bd-status-tabs">
+              {statusTabs.map(tab => {
+                const count = tab.key === 'all'
+                  ? sentRequestsList.length
+                  : sentRequestsList.filter(r => r.status === tab.key).length;
+                return (
+                  <button
+                    key={tab.key}
+                    className={`bd-status-tab ${requestsStatusFilter === tab.key ? 'active' : ''}`}
+                    onClick={() => setRequestsStatusFilter(tab.key)}
+                    style={{
+                      borderColor: requestsStatusFilter === tab.key ? tab.color : 'transparent',
+                      color: requestsStatusFilter === tab.key ? tab.color : '#9ca3af',
+                    }}
+                  >
+                    <span className="bd-status-tab-dot" style={{ background: tab.color }} />
+                    {tab.label}
+                    <span className="bd-status-tab-count">{count}</span>
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Stats Row */}
+            <div className="bd-stats-grid" style={{ marginBottom: 24 }}>
+              <StatCard label="Total Sent" value={sentRequestsList.length} color="#6366f1" icon="📤" />
+              <StatCard label="Awaiting" value={sentRequestsList.filter(r => r.status === 'requested').length} color="#fbbf24" icon="⏳" />
+              <StatCard label="Accepted" value={sentRequestsList.filter(r => r.status === 'accepted').length} color="#22c55e" icon="✅" />
+              <StatCard label="Completed" value={sentRequestsList.filter(r => r.status === 'completed').length} color="#a78bfa" icon="🎉" />
+            </div>
+
+            {filteredSentRequests.length === 0 ? (
+              <div className="bd-content-card">
+                <div className="bd-empty-state">
+                  <div className="bd-empty-icon">📤</div>
+                  <p>No requests sent yet.</p>
+                  <p style={{ fontSize: '0.85rem', color: '#6b7280' }}>
+                    Browse available materials and send requests to generators.
+                  </p>
+                  <button className="bd-btn-primary" onClick={() => { setActiveTab('findMaterial'); setFindMaterialMode('browse'); }}>
+                    <i className="fas fa-search me-2"></i>Find Material
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="bd-content-card">
+                <div className="bd-table-wrap">
+                  <table className="bd-data-table">
+                    <thead>
+                      <tr>
+                        <th>Material</th>
+                        <th>Quantity</th>
+                        <th>Price/kg</th>
+                        <th>Total</th>
+                        <th>Generator</th>
+                        <th>Status</th>
+                        <th>Sent On</th>
+                        <th>Action</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filteredSentRequests.map(r => (
+                        <tr key={r._id}>
+                          <td>
+                            <strong style={{ color: 'white' }}>{r.material}</strong>
+                            {r.materialSubtype && (
+                              <div>
+                                <small style={{ color: '#a78bfa', fontSize: '0.7rem' }}>{r.materialSubtype}</small>
+                              </div>
+                            )}
+                          </td>
+                          <td>{r.quantity} kg</td>
+                          <td>₹{r.pricePerUnit}/kg</td>
+                          <td>
+                            <strong style={{ color: '#22c55e' }}>₹{r.totalAmount?.toLocaleString('en-IN')}</strong>
+                            <div>
+                              <small style={{ color: '#6b7280', fontSize: '0.68rem' }}>
+                                +₹{r.buyerCommission} fee
+                              </small>
+                            </div>
+                          </td>
+                          <td>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                              <div style={{
+                                width: 26, height: 26, borderRadius: '50%',
+                                background: 'linear-gradient(135deg, #6366f1, #8b5cf6)',
+                                color: 'white', display: 'flex', alignItems: 'center',
+                                justifyContent: 'center', fontSize: '0.7rem', fontWeight: 700,
+                              }}>
+                                {(r.generatorName || 'U').charAt(0).toUpperCase()}
+                              </div>
+                              <span style={{ fontSize: '0.85rem' }}>{r.generatorName || 'Unknown'}</span>
+                            </div>
+                          </td>
+                          <td>
+                            <span className={`bd-status-badge ${r.status === 'requested' ? 'bd-status-open' :
+                              r.status === 'accepted' ? 'bd-status-matched' :
+                                r.status === 'completed' ? 'bd-status-closed' :
+                                  'bd-status-closed'
+                              }`}>
+                              {r.status?.toUpperCase()}
+                            </span>
+                          </td>
+                          <td>
+                            <small style={{ color: '#9ca3af', fontSize: '0.75rem' }}>
+                              {formatDate(r.createdAt)}
+                            </small>
+                          </td>
+                          <td>
+                            {r.status === 'accepted' && (
+                              <button
+                                className="bd-btn-outline-sm"
+                                style={{ color: '#22c55e', borderColor: 'rgba(34,197,94,0.3)' }}
+                                onClick={() => markReceived(r._id)}
+                                title="Mark as received"
+                              >
+                                <i className="fas fa-truck"></i> Received
+                              </button>
+                            )}
+                            {(r.status === 'completed' || r.status === 'rejected') && (
+                              <span style={{ fontSize: '0.75rem', color: '#6b7280' }}>—</span>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      }
 
       case 'create':
         return (
@@ -992,9 +1546,9 @@ const BuyerDashboard = () => {
             </div>
 
             <div className="bd-stats-grid" style={{ marginBottom: 24 }}>
-              <StatCard label="Received Offers" value={receivedOffers.filter(d => d.status === 'offered').length} color="#22c55e" icon="📥" />
-              <StatCard label="Sent Requests" value={sentRequests.length} color="#60a5fa" icon="📤" />
-              <StatCard label="Active Deals" value={activeDeals.length} color="#fbbf24" icon="🔄" />
+              <StatCard label="Pending Offers" value={receivedOffers.filter(d => d.status === 'offered').length} color="#22c55e" icon="📥" />
+              <StatCard label="My Requests" value={sentRequests.length} color="#60a5fa" icon="📤" />
+              <StatCard label="Paid Deals" value={activeDeals.length} color="#fbbf24" icon="🔄" />
               <StatCard label="Completed" value={myDeals.filter(d => d.status === 'completed').length} color="#a78bfa" icon="✅" />
             </div>
 
@@ -1020,7 +1574,7 @@ const BuyerDashboard = () => {
                           <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 6 }}>
                             <strong style={{ fontSize: '1rem', color: 'white' }}>{d.material}</strong>
                             <span style={{ background: 'rgba(139,92,246,0.15)', color: '#a78bfa', padding: '2px 10px', borderRadius: 20, fontSize: '0.7rem', fontWeight: 600 }}>
-                              <i className="fas fa-user me-1"></i>{d.generatorName}
+                              <i className="fas fa-user me-1"></i>{d.generatorName || 'Unknown Generator'}
                             </span>
                             <span className={`bd-status-badge ${d.status === 'offered' ? 'bd-status-open' : d.status === 'accepted' ? 'bd-status-matched' : 'bd-status-closed'}`}>{d.status.toUpperCase()}</span>
                           </div>
@@ -1044,8 +1598,13 @@ const BuyerDashboard = () => {
                           </div>
                         )}
                         {d.status === 'accepted' && (
-                          <div style={{ fontSize: '0.75rem', color: '#60a5fa', fontWeight: 600, padding: '8px 12px', background: 'rgba(96,165,250,0.1)', borderRadius: 8 }}>
-                            <i className="fas fa-check-circle me-1"></i> Deal Accepted
+                          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                            <div style={{ fontSize: '0.75rem', color: '#60a5fa', fontWeight: 600, padding: '8px 12px', background: 'rgba(96,165,250,0.1)', borderRadius: 8 }}>
+                              <i className="fas fa-check-circle me-1"></i> Paid · Accepted
+                            </div>
+                            <button onClick={() => markReceived(d._id)} style={{ padding: '8px 16px', borderRadius: 8, border: 'none', background: 'linear-gradient(135deg, #22c55e, #16a34a)', color: 'white', cursor: 'pointer', fontWeight: 600, fontSize: '0.8rem', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                              <i className="fas fa-truck"></i> Mark Received
+                            </button>
                           </div>
                         )}
                       </div>
@@ -1058,6 +1617,7 @@ const BuyerDashboard = () => {
             <div className="bd-content-card">
               <div className="bd-card-title">
                 <span><i className="fas fa-paper-plane me-2" style={{ color: '#60a5fa' }}></i>My Requests to Generators ({sentRequests.length})</span>
+                <button className="bd-link-btn" onClick={() => setActiveTab('requestsSent')}>View Detailed</button>
               </div>
               {sentRequests.length === 0 ? (
                 <div className="bd-empty-state">
@@ -1067,7 +1627,7 @@ const BuyerDashboard = () => {
                 </div>
               ) : (
                 <div style={{ display: 'grid', gap: 12 }}>
-                  {sentRequests.map(d => (
+                  {sentRequests.slice(0, 5).map(d => (
                     <div key={d._id} style={{
                       background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)',
                       borderLeft: '4px solid #60a5fa', borderRadius: 12, padding: '14px 16px',
@@ -1077,7 +1637,7 @@ const BuyerDashboard = () => {
                         <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 4 }}>
                           <strong style={{ color: 'white' }}>{d.material}</strong>
                           <span style={{ fontSize: '0.75rem', color: '#9ca3af' }}>
-                            <i className="fas fa-user me-1"></i>{d.generatorName}
+                            <i className="fas fa-user me-1"></i>{d.generatorName || 'Unknown Generator'}
                           </span>
                           <span className={`bd-status-badge ${d.status === 'accepted' ? 'bd-status-matched' : d.status === 'rejected' ? 'bd-status-closed' : 'bd-status-open'}`}>
                             {d.status.toUpperCase()}
@@ -1091,6 +1651,11 @@ const BuyerDashboard = () => {
                       </div>
                     </div>
                   ))}
+                  {sentRequests.length > 5 && (
+                    <button className="bd-btn-secondary bd-btn-sm" onClick={() => setActiveTab('requestsSent')}>
+                      View all {sentRequests.length} requests
+                    </button>
+                  )}
                 </div>
               )}
             </div>
@@ -1116,11 +1681,7 @@ const BuyerDashboard = () => {
                     </div>
                   ) : (
                     conversationPartners.map(name => (
-                      <div
-                        key={name}
-                        className={`bd-conv-item ${selectedConversation === name ? 'active' : ''}`}
-                        onClick={() => setSelectedConversation(name)}
-                      >
+                      <div key={name} className={`bd-conv-item ${selectedConversation === name ? 'active' : ''}`} onClick={() => setSelectedConversation(name)}>
                         <div className="bd-conv-avatar">{name.charAt(0).toUpperCase()}</div>
                         <div className="bd-conv-info">
                           <div className="bd-conv-name">{name}</div>
@@ -1190,73 +1751,344 @@ const BuyerDashboard = () => {
 
       case 'addMoney':
         return (
-          <div className="bd-add-money">
-            <h2>💰 Add Money</h2>
-            <div className="bd-wallet-info">
-              <p>Current Balance: <strong>₹{user?.walletBalance || 0}</strong></p>
-              <p className="bd-limit-note">Daily limit: ₹100,000 for buyers</p>
+          <div style={{ maxWidth: 720, margin: '0 auto' }}>
+            <h2 style={{ color: 'white', marginBottom: 24, fontSize: '1.3rem' }}>💰 Add Money</h2>
+
+            {/* Wallet Balance Card */}
+            <div style={{
+              background: 'linear-gradient(135deg, rgba(34,197,94,0.08), rgba(99,102,241,0.06))',
+              border: '1px solid rgba(34,197,94,0.2)',
+              borderRadius: 14,
+              padding: '20px 22px',
+              marginBottom: 20,
+            }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
+                <div>
+                  <div style={{ fontSize: '0.75rem', color: '#9ca3af', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                    <i className="fas fa-wallet me-2"></i>Current Balance
+                  </div>
+                  <div style={{ fontSize: '2.2rem', fontWeight: 800, color: '#22c55e', letterSpacing: '-0.5px' }}>
+                    ₹{(user?.walletBalance || 0).toLocaleString('en-IN')}
+                  </div>
+                </div>
+                <div style={{ textAlign: 'right', fontSize: '0.75rem', color: '#9ca3af' }}>
+                  <div>Daily limit: ₹100,000</div>
+                  <div style={{ marginTop: 4 }}>Instant credit</div>
+                </div>
+              </div>
             </div>
-            <div className="bd-form-group">
-              <label>Amount (₹)</label>
-              <input type="number" className="bd-form-input" value={addMoneyAmount} onChange={(e) => setAddMoneyAmount(e.target.value)} placeholder="Enter amount" />
-              {addMoneyError && <small className="bd-error-text">{addMoneyError}</small>}
+
+            {/* Add Money Form */}
+            <div className="bd-content-card" style={{ marginBottom: 20 }}>
+              <h3 style={{ marginTop: 0, color: '#a78bfa', fontSize: '1rem', marginBottom: 18 }}>
+                <i className="fas fa-plus-circle me-2"></i>Add Funds
+              </h3>
+
+              <div className="bd-form-group">
+                <label>Amount (₹)</label>
+                <input
+                  type="number"
+                  className="bd-form-input"
+                  value={addMoneyAmount}
+                  onChange={(e) => setAddMoneyAmount(e.target.value)}
+                  placeholder="Enter amount (min ₹100)"
+                />
+                {addMoneyError && <small className="bd-error-text">{addMoneyError}</small>}
+              </div>
+
+              {/* Quick Amount Buttons */}
+              <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap' }}>
+                {[500, 1000, 2000, 5000, 10000].map(amt => (
+                  <button
+                    key={amt}
+                    type="button"
+                    onClick={() => setAddMoneyAmount(String(amt))}
+                    style={{
+                      padding: '6px 14px',
+                      borderRadius: 8,
+                      border: '1px solid rgba(99,102,241,0.3)',
+                      background: 'rgba(99,102,241,0.08)',
+                      color: '#a78bfa',
+                      cursor: 'pointer',
+                      fontSize: '0.8rem',
+                      fontWeight: 600,
+                    }}
+                  >
+                    +₹{amt.toLocaleString('en-IN')}
+                  </button>
+                ))}
+              </div>
+
+              <button
+                onClick={handleAddMoney}
+                className="bd-btn-primary"
+                disabled={addMoneyLoading}
+                style={{ width: '100%' }}
+              >
+                {addMoneyLoading ? 'Processing...' : <><i className="fas fa-plus me-2"></i>Add Money</>}
+              </button>
             </div>
-            <button onClick={handleAddMoney} className="bd-btn-primary" disabled={addMoneyLoading}>
-              {addMoneyLoading ? 'Processing...' : 'Add Money'}
-            </button>
+
+            {/* ✅ Transaction History */}
+            <div className="bd-content-card">
+              <div className="bd-card-title">
+                <span>
+                  <i className="fas fa-history me-2" style={{ color: '#60a5fa' }}></i>
+                  Transaction History ({walletTransactions.length})
+                </span>
+              </div>
+
+              {walletTransactions.length === 0 ? (
+                <div className="bd-empty-state" style={{ padding: '32px 16px' }}>
+                  <div className="bd-empty-icon">💳</div>
+                  <p>No transactions yet</p>
+                  <small style={{ color: '#6b7280' }}>Your wallet activity will appear here</small>
+                </div>
+              ) : (
+                <div className="bd-table-wrap">
+                  <table className="bd-data-table">
+                    <thead>
+                      <tr>
+                        <th>Date</th>
+                        <th>Type</th>
+                        <th>Method</th>
+                        <th style={{ textAlign: 'right' }}>Amount</th>
+                        <th style={{ textAlign: 'right' }}>Balance</th>
+                        <th>Status</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {walletTransactions.map(tx => {
+                        const isCredit = tx.amount > 0;
+                        const typeMap = {
+                          add_money: { label: 'Add Money', icon: 'plus-circle', color: '#22c55e' },
+                          withdraw: { label: 'Withdraw', icon: 'arrow-down', color: '#f87171' },
+                          deal_payment: { label: 'Deal Payment', icon: 'handshake', color: '#fbbf24' },
+                          deal_receive: { label: 'Deal Received', icon: 'handshake', color: '#60a5fa' },
+                          refund: { label: 'Refund', icon: 'undo', color: '#a78bfa' },
+                        };
+                        const meta = typeMap[tx.type] || { label: tx.type, icon: 'circle', color: '#9ca3af' };
+
+                        return (
+                          <tr key={tx._id}>
+                            <td>
+                              <small style={{ color: '#9ca3af' }}>
+                                {new Date(tx.createdAt).toLocaleString('en-IN', {
+                                  day: '2-digit',
+                                  month: 'short',
+                                  year: 'numeric',
+                                  hour: '2-digit',
+                                  minute: '2-digit',
+                                })}
+                              </small>
+                            </td>
+                            <td>
+                              <span style={{ color: meta.color, fontWeight: 600, fontSize: '0.85rem' }}>
+                                <i className={`fas fa-${meta.icon} me-1`}></i>
+                                {meta.label}
+                              </span>
+                            </td>
+                            <td>
+                              <small style={{ color: '#9ca3af', textTransform: 'uppercase' }}>
+                                {tx.method || '—'}
+                              </small>
+                            </td>
+                            <td style={{
+                              textAlign: 'right',
+                              fontWeight: 700,
+                              color: isCredit ? '#22c55e' : '#f87171',
+                            }}>
+                              {isCredit ? '+' : ''}₹{Math.abs(tx.amount).toLocaleString('en-IN')}
+                            </td>
+                            <td style={{ textAlign: 'right', color: '#d1d5db', fontSize: '0.85rem' }}>
+                              ₹{(tx.balanceAfter || 0).toLocaleString('en-IN')}
+                            </td>
+                            <td>
+                              <span className={`bd-status-badge ${tx.status === 'success' ? 'bd-status-open' :
+                                  tx.status === 'pending' ? 'bd-status-closed' :
+                                    tx.status === 'processing' ? 'bd-status-matched' :
+                                      'bd-status-closed'
+                                }`}>
+                                {tx.status}
+                              </span>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
           </div>
         );
 
-      case 'profile':
+      // ✅ EXTENDED PROFILE - Full company details like Generator
+      case 'profile': {
+        const companyFields = [
+          { key: 'companyName', label: 'Company Name', type: 'text' },
+          { key: 'companyRegistrationNo', label: 'Registration Number', type: 'text' },
+          { key: 'gstNumber', label: 'GST Number', type: 'text' },
+          { key: 'panNumber', label: 'PAN Number', type: 'text' },
+          { key: 'companyAddress', label: 'Company Address', type: 'textarea' },
+          { key: 'companyCity', label: 'City', type: 'text' },
+          { key: 'companyState', label: 'State', type: 'text' },
+          { key: 'companyPincode', label: 'Pincode', type: 'text' },
+          { key: 'companyCountry', label: 'Country', type: 'text' },
+          { key: 'website', label: 'Website', type: 'url' },
+          { key: 'yearEstablished', label: 'Year Established', type: 'number' },
+          { key: 'contactPerson', label: 'Contact Person', type: 'text' },
+          { key: 'contactPhone', label: 'Contact Phone', type: 'tel' },
+          { key: 'contactEmail', label: 'Contact Email', type: 'email' },
+        ];
+
         return (
-          <div className="bd-profile">
+          <div style={{ maxWidth: 900 }}>
             <div className="bd-profile-header">
               <h2>👤 My Profile</h2>
-              {!profileEditMode ? (
-                <button className="bd-btn-primary bd-btn-sm" onClick={() => setProfileEditMode(true)}>
-                  <i className="fas fa-edit me-1"></i>Edit Profile
-                </button>
-              ) : (
-                <button className="bd-btn-secondary bd-btn-sm" onClick={() => {
-                  setProfileEditMode(false);
-                  setProfileForm({ name: user?.name || '', email: user?.email || '', password: '' });
-                  setProfileErrors({});
-                }}>Cancel</button>
-              )}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+                <span style={{
+                  background: user?.isCompanyVerified ? 'rgba(34,197,94,0.15)' : 'rgba(251,191,36,0.15)',
+                  color: user?.isCompanyVerified ? '#22c55e' : '#fbbf24',
+                  padding: '6px 14px', borderRadius: 20, fontSize: '0.72rem',
+                  fontWeight: 700,
+                  border: `1px solid ${user?.isCompanyVerified ? 'rgba(34,197,94,0.3)' : 'rgba(251,191,36,0.3)'}`,
+                  display: 'inline-flex', alignItems: 'center', gap: 6,
+                }}>
+                  <i className={`fas fa-${user?.isCompanyVerified ? 'check-circle' : 'clock'}`}></i>
+                  {user?.isCompanyVerified ? 'Company Verified' : 'Verification Pending'}
+                </span>
+                {!profileEditMode ? (
+                  <button className="bd-btn-primary bd-btn-sm" onClick={() => setProfileEditMode(true)}>
+                    <i className="fas fa-edit me-1"></i>Edit Profile
+                  </button>
+                ) : (
+                  <button className="bd-btn-secondary bd-btn-sm" onClick={() => {
+                    setProfileEditMode(false);
+                    setProfileErrors({});
+                    // Reset to user data
+                    setProfileForm({
+                      name: user?.name || '', email: user?.email || '', phone: user?.phone || '', password: '',
+                      companyName: user?.companyName || '', companyRegistrationNo: user?.companyRegistrationNo || '',
+                      gstNumber: user?.gstNumber || '', panNumber: user?.panNumber || '',
+                      companyAddress: user?.companyAddress || '', companyCity: user?.companyCity || '',
+                      companyState: user?.companyState || '', companyPincode: user?.companyPincode || '',
+                      companyCountry: user?.companyCountry || 'India', website: user?.website || '',
+                      yearEstablished: user?.yearEstablished || '', businessDescription: user?.businessDescription || '',
+                      companyType: user?.companyType || 'private', contactPerson: user?.contactPerson || '',
+                      contactPhone: user?.contactPhone || '', contactEmail: user?.contactEmail || '',
+                    });
+                  }}>Cancel</button>
+                )}
+              </div>
             </div>
+
             <form onSubmit={handleProfileUpdate}>
-              <div className="bd-form-group">
-                <label>Name</label>
-                <input type="text" className="bd-form-input" name="name" value={profileForm.name} readOnly={!profileEditMode} onChange={(e) => setProfileForm({ ...profileForm, name: e.target.value })} style={!profileEditMode ? { opacity: 0.7 } : {}} />
-                {profileErrors.name && <small className="bd-error-text">{profileErrors.name}</small>}
-              </div>
-              <div className="bd-form-group">
-                <label>Email</label>
-                <input type="email" className="bd-form-input" name="email" value={profileForm.email} readOnly={!profileEditMode} onChange={(e) => setProfileForm({ ...profileForm, email: e.target.value })} style={!profileEditMode ? { opacity: 0.7 } : {}} />
-                {profileErrors.email && <small className="bd-error-text">{profileErrors.email}</small>}
-              </div>
-              {profileEditMode && (
-                <div className="bd-form-group">
-                  <label>New Password (leave blank to keep current)</label>
-                  <input type="password" className="bd-form-input" name="password" value={profileForm.password} onChange={(e) => setProfileForm({ ...profileForm, password: e.target.value })} placeholder="Enter new password" />
-                  {profileErrors.password && <small className="bd-error-text">{profileErrors.password}</small>}
+              {/* Account Information */}
+              <div className="bd-content-card" style={{ marginBottom: 20 }}>
+                <h3 style={{ marginTop: 0, color: '#a78bfa', fontSize: '1rem', marginBottom: 18 }}>
+                  <i className="fas fa-user me-2"></i>Account Information
+                </h3>
+                <div className="bd-form-grid">
+                  <div className="bd-form-group">
+                    <label>Name *</label>
+                    <input type="text" className="bd-form-input" value={profileForm.name} readOnly={!profileEditMode} onChange={(e) => setProfileForm({ ...profileForm, name: e.target.value })} style={!profileEditMode ? { opacity: 0.7 } : {}} />
+                    {profileErrors.name && <small className="bd-error-text">{profileErrors.name}</small>}
+                  </div>
+                  <div className="bd-form-group">
+                    <label>Email *</label>
+                    <input type="email" className="bd-form-input" value={profileForm.email} readOnly={!profileEditMode} onChange={(e) => setProfileForm({ ...profileForm, email: e.target.value })} style={!profileEditMode ? { opacity: 0.7 } : {}} />
+                    {profileErrors.email && <small className="bd-error-text">{profileErrors.email}</small>}
+                  </div>
+                  <div className="bd-form-group">
+                    <label>Phone</label>
+                    <input type="tel" className="bd-form-input" value={profileForm.phone} readOnly={!profileEditMode} onChange={(e) => setProfileForm({ ...profileForm, phone: e.target.value })} placeholder="10-digit mobile" style={!profileEditMode ? { opacity: 0.7 } : {}} />
+                  </div>
+                  {profileEditMode && (
+                    <div className="bd-form-group">
+                      <label>New Password (leave blank to keep current)</label>
+                      <input type="password" className="bd-form-input" value={profileForm.password} onChange={(e) => setProfileForm({ ...profileForm, password: e.target.value })} placeholder="Enter new password" />
+                      {profileErrors.password && <small className="bd-error-text">{profileErrors.password}</small>}
+                    </div>
+                  )}
                 </div>
-              )}
+              </div>
+
+              {/* Company Information */}
+              <div className="bd-content-card" style={{ marginBottom: 20 }}>
+                <h3 style={{ marginTop: 0, color: '#60a5fa', fontSize: '1rem', marginBottom: 18 }}>
+                  <i className="fas fa-building me-2"></i>Company Information
+                </h3>
+                <div className="bd-form-grid">
+                  {companyFields.map(field => (
+                    <div key={field.key} className="bd-form-group" style={{ gridColumn: field.type === 'textarea' ? '1/-1' : 'auto' }}>
+                      <label>{field.label}</label>
+                      {field.type === 'textarea' ? (
+                        <textarea
+                          rows={2}
+                          className="bd-form-input"
+                          value={profileForm[field.key] || ''}
+                          readOnly={!profileEditMode}
+                          onChange={(e) => setProfileForm({ ...profileForm, [field.key]: e.target.value })}
+                          style={!profileEditMode ? { opacity: 0.7 } : {}}
+                        />
+                      ) : (
+                        <input
+                          type={field.type}
+                          className="bd-form-input"
+                          value={profileForm[field.key] || ''}
+                          readOnly={!profileEditMode}
+                          onChange={(e) => setProfileForm({ ...profileForm, [field.key]: e.target.value })}
+                          style={!profileEditMode ? { opacity: 0.7 } : {}}
+                        />
+                      )}
+                    </div>
+                  ))}
+                  <div className="bd-form-group" style={{ gridColumn: '1/-1' }}>
+                    <label>Company Type</label>
+                    <select className="bd-form-input" value={profileForm.companyType || 'private'} disabled={!profileEditMode} onChange={(e) => setProfileForm({ ...profileForm, companyType: e.target.value })} style={!profileEditMode ? { opacity: 0.7 } : {}}>
+                      <option value="private">Private Limited</option>
+                      <option value="public">Public Limited</option>
+                      <option value="partnership">Partnership</option>
+                      <option value="sole">Sole Proprietorship</option>
+                      <option value="llp">LLP</option>
+                      <option value="other">Other</option>
+                    </select>
+                  </div>
+                  <div className="bd-form-group" style={{ gridColumn: '1/-1' }}>
+                    <label>Business Description</label>
+                    <textarea
+                      rows={3}
+                      className="bd-form-input"
+                      value={profileForm.businessDescription || ''}
+                      readOnly={!profileEditMode}
+                      onChange={(e) => setProfileForm({ ...profileForm, businessDescription: e.target.value })}
+                      placeholder="Brief about your business..."
+                      style={!profileEditMode ? { opacity: 0.7 } : {}}
+                    />
+                  </div>
+                </div>
+              </div>
+
               {profileEditMode && (
-                <button type="submit" className="bd-btn-primary" disabled={profileLoading}>
-                  {profileLoading ? 'Updating...' : 'Save Changes'}
+                <button type="submit" className="bd-btn-primary" disabled={profileLoading} style={{ width: '100%' }}>
+                  {profileLoading ? (
+                    <><i className="fas fa-spinner fa-spin me-2"></i>Saving...</>
+                  ) : (
+                    <><i className="fas fa-save me-2"></i>Save All Changes</>
+                  )}
                 </button>
               )}
             </form>
           </div>
         );
+      }
 
       default:
         return null;
     }
   };
 
-  // ----- Modals -----
   const renderEditModal = () => {
     if (!editingRequirement) return null;
     return (
@@ -1382,20 +2214,48 @@ const BuyerDashboard = () => {
     );
   };
 
-  if (loading) return <div className="bd-loading">Loading...</div>;
+  if (loading) {
+    return (
+      <>
+        <style>{`
+        .bd-loading-container { position: fixed; inset: 0; background: #0a0a0f; display: flex; align-items: center; justify-content: center; z-index: 99999; }
+        [data-theme="light"] .bd-loading-container { background: #f8fafc; }
+        .bd-loading-logo-wrap { display: flex; flex-direction: column; align-items: center; gap: 20px; }
+        .bd-loading-logo-ring { position: relative; width: 120px; height: 120px; display: flex; align-items: center; justify-content: center; }
+        .bd-loading-logo-ring::before { content: ''; position: absolute; inset: 0; border-radius: 50%; border: 3px solid transparent; border-top-color: #6366f1; border-right-color: #8b5cf6; animation: bd-spin-ring 1.2s linear infinite; }
+        .bd-loading-logo-ring::after { content: ''; position: absolute; inset: 10px; border-radius: 50%; border: 2px solid transparent; border-top-color: #60a5fa; border-left-color: #a78bfa; animation: bd-spin-ring 1.8s linear infinite reverse; }
+        .bd-loading-logo-inner { width: 80px; height: 80px; border-radius: 20px; background: linear-gradient(135deg, #6366f1, #8b5cf6); display: flex; align-items: center; justify-content: center; font-size: 2.4rem; color: white; box-shadow: 0 0 40px rgba(99,102,241,0.5); animation: bd-logo-breathe 2s ease-in-out infinite; }
+        @keyframes bd-spin-ring { to { transform: rotate(360deg); } }
+        @keyframes bd-logo-breathe { 0%, 100% { transform: scale(1); box-shadow: 0 0 40px rgba(99,102,241,0.5); } 50% { transform: scale(1.08); box-shadow: 0 0 60px rgba(99,102,241,0.8); } }
+        .bd-loading-text { font-size: 1.5rem; font-weight: 800; background: linear-gradient(135deg, #a78bfa, #60a5fa); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; letter-spacing: -0.5px; margin: 0; animation: bd-text-pulse 2s ease-in-out infinite; }
+        @keyframes bd-text-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
+        .bd-loading-tagline { color: #6b7280; font-size: 0.85rem; letter-spacing: 0.5px; margin-top: -12px; }
+        .bd-loading-dots { display: flex; gap: 6px; margin-top: 8px; }
+        .bd-loading-dots span { width: 8px; height: 8px; border-radius: 50%; background: #6366f1; animation: bd-dot-bounce 1.4s ease-in-out infinite; }
+        .bd-loading-dots span:nth-child(2) { animation-delay: 0.2s; background: #8b5cf6; }
+        .bd-loading-dots span:nth-child(3) { animation-delay: 0.4s; background: #60a5fa; }
+        @keyframes bd-dot-bounce { 0%, 80%, 100% { transform: translateY(0); opacity: 0.5; } 40% { transform: translateY(-10px); opacity: 1; } }
+      `}</style>
+        <div className="bd-loading-container">
+          <div className="bd-loading-logo-wrap">
+            <div className="bd-loading-logo-ring">
+              <div className="bd-loading-logo-inner"><i className="fas fa-recycle"></i></div>
+            </div>
+            <h1 className="bd-loading-text">WasteExchange AI</h1>
+            <p className="bd-loading-tagline">Smart Waste Marketplace</p>
+            <div className="bd-loading-dots"><span></span><span></span><span></span></div>
+          </div>
+        </div>
+      </>
+    );
+  }
 
   return (
     <div className="bd-dashboard-wrapper">
       <div className={`bd-sidebar ${sidebarCollapsed ? 'collapsed' : ''}`}>
         <div className="bd-brand-photo">
           <div className="bd-brand-avatar" onClick={() => profilePhotoInputRef.current?.click()} title="Update photo">
-            {profilePhotoUploading ? (
-              <i className="fas fa-spinner fa-spin"></i>
-            ) : profilePhoto ? (
-              <img src={profilePhoto} alt="Profile" />
-            ) : (
-              <span>{user?.name?.charAt(0) || 'B'}</span>
-            )}
+            {profilePhotoUploading ? (<i className="fas fa-spinner fa-spin"></i>) : profilePhoto ? (<img src={profilePhoto} alt="Profile" />) : (<span>{user?.name?.charAt(0) || 'B'}</span>)}
             <span className="bd-brand-avatar-overlay"><i className="fas fa-camera"></i></span>
           </div>
           <input ref={profilePhotoInputRef} type="file" accept="image/*" style={{ display: 'none' }} onChange={handleProfilePhotoChange} />
@@ -1404,7 +2264,7 @@ const BuyerDashboard = () => {
 
         <div className="bd-logo">
           <div className="bd-logo-icon"><i className="fas fa-recycle"></i></div>
-          {!sidebarCollapsed && <div className="bd-logo-text">WasteExchange</div>}
+          {!sidebarCollapsed && <div className="bd-logo-text">WasteExchange AI</div>}
         </div>
 
         <div className="bd-sidebar-nav">
@@ -1440,7 +2300,7 @@ const BuyerDashboard = () => {
             <div className="bd-user-avatar">{user?.name?.charAt(0)}</div>
             <div className="bd-user-info">
               <h4>{user?.name}</h4>
-              <p>Buyer Portal</p>
+              <p>Buyer · ₹{(user?.walletBalance || 0).toLocaleString('en-IN')}</p>
             </div>
           </div>
         )}
@@ -1467,6 +2327,7 @@ const BuyerDashboard = () => {
               <i className="fas fa-search"></i>
               <input type="text" placeholder="Search..." />
             </div>
+            <ThemeToggle />
             <div className="bd-notification-btn">
               <i className="fas fa-bell"></i>
               {unreadCount > 0 && <div className="bd-notification-dot"></div>}
@@ -1484,6 +2345,208 @@ const BuyerDashboard = () => {
           {renderListingDetailModal()}
         </div>
       </div>
+
+      <InsufficientBalanceModal
+        open={balanceModal.open}
+        required={balanceModal.required}
+        available={balanceModal.available}
+        context={balanceModal.context}
+        onClose={() => setBalanceModal({ open: false, required: 0, available: 0, context: '' })}
+        onAddMoney={() => {
+          setBalanceModal({ open: false, required: 0, available: 0, context: '' });
+          setActiveTab('addMoney');
+        }}
+      />
+
+      {paymentChoiceModal.open && paymentChoiceModal.deal && (
+        <div
+          onClick={() => setPaymentChoiceModal({ open: false, deal: null, walletBalance: 0, canUseWallet: false })}
+          style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.75)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 2000, backdropFilter: 'blur(4px)', padding: 20 }}
+        >
+          <div onClick={e => e.stopPropagation()} style={{ background: '#1a1a2e', borderRadius: 16, maxWidth: 480, width: '100%', border: '1px solid rgba(99,102,241,0.3)', overflow: 'hidden' }}>
+            <div style={{ padding: '20px 24px', background: 'linear-gradient(135deg, rgba(99,102,241,0.15), rgba(139,92,246,0.08))', borderBottom: '1px solid rgba(99,102,241,0.2)', display: 'flex', alignItems: 'center', gap: 12 }}>
+              <div style={{ width: 44, height: 44, borderRadius: '50%', background: 'rgba(99,102,241,0.2)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '1.4rem', color: '#a78bfa' }}>💳</div>
+              <div style={{ flex: 1 }}>
+                <h3 style={{ margin: 0, color: 'white', fontSize: '1.1rem' }}>Choose Payment Method</h3>
+                <p style={{ margin: '2px 0 0', color: '#9ca3af', fontSize: '0.8rem' }}>Pay for {paymentChoiceModal.deal.material} ({paymentChoiceModal.deal.quantity}kg)</p>
+              </div>
+            </div>
+
+            <div style={{ padding: '20px 24px' }}>
+              <div style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.06)', borderRadius: 12, padding: '16px 18px', marginBottom: 18, textAlign: 'center' }}>
+                <div style={{ fontSize: '0.75rem', color: '#9ca3af', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.5px' }}>Total Amount</div>
+                <div style={{ fontSize: '2rem', fontWeight: 800, color: '#22c55e', letterSpacing: '-0.5px' }}>₹{paymentChoiceModal.deal.buyerTotalPayment.toLocaleString('en-IN')}</div>
+                <div style={{ fontSize: '0.72rem', color: '#6b7280', marginTop: 4 }}>Includes ₹{paymentChoiceModal.deal.buyerCommission} (2% platform fee)</div>
+              </div>
+
+              {paymentChoiceModal.canUseWallet ? (
+                <button onClick={() => payViaWallet(paymentChoiceModal.deal)} style={{ width: '100%', padding: '16px 20px', marginBottom: 12, borderRadius: 12, border: '1px solid rgba(34,197,94,0.3)', background: 'rgba(34,197,94,0.08)', color: 'white', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontWeight: 600, fontSize: '0.9rem', textAlign: 'left' }}>
+                  <div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                      <i className="fas fa-wallet" style={{ color: '#22c55e', fontSize: '1.1rem' }}></i>
+                      <span>Pay from Wallet</span>
+                    </div>
+                    <div style={{ fontSize: '0.72rem', color: '#9ca3af' }}>Balance: ₹{paymentChoiceModal.walletBalance.toLocaleString('en-IN')}</div>
+                  </div>
+                  <i className="fas fa-arrow-right" style={{ color: '#22c55e' }}></i>
+                </button>
+              ) : (
+                <div style={{ padding: '12px 16px', marginBottom: 12, borderRadius: 10, background: 'rgba(251,191,36,0.08)', border: '1px solid rgba(251,191,36,0.2)', fontSize: '0.78rem', color: '#fbbf24' }}>
+                  <i className="fas fa-info-circle me-2"></i>
+                  Wallet balance (₹{paymentChoiceModal.walletBalance.toLocaleString('en-IN')}) is insufficient. Short by ₹{(paymentChoiceModal.deal.buyerTotalPayment - paymentChoiceModal.walletBalance).toLocaleString('en-IN')}.
+                </div>
+              )}
+
+              <button
+                onClick={() => {
+                  const deal = paymentChoiceModal.deal;
+                  setPaymentChoiceModal({ open: false, deal: null, walletBalance: 0, canUseWallet: false });
+                  setRazorpayModal({ open: true, deal, mode: 'deal_payment', amount: deal.buyerTotalPayment });
+                }}
+                style={{ width: '100%', padding: '16px 20px', borderRadius: 12, border: 'none', background: 'linear-gradient(135deg, #6366f1, #8b5cf6)', color: 'white', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontWeight: 600, fontSize: '0.9rem', textAlign: 'left', boxShadow: '0 4px 12px rgba(99,102,241,0.3)' }}
+              >
+                <div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                    <i className="fas fa-credit-card" style={{ fontSize: '1.1rem' }}></i>
+                    <span>Pay via Razorpay</span>
+                  </div>
+                  <div style={{ fontSize: '0.72rem', color: 'rgba(255,255,255,0.7)' }}>Card · UPI · Netbanking · Wallet</div>
+                </div>
+                <i className="fas fa-arrow-right"></i>
+              </button>
+
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: '0.72rem', color: '#6b7280', marginTop: 14, justifyContent: 'center' }}>
+                <i className="fas fa-lock" style={{ color: '#22c55e' }}></i>
+                Secured by Razorpay · PCI-DSS Compliant
+              </div>
+            </div>
+
+            <div style={{ padding: '16px 24px', borderTop: '1px solid rgba(255,255,255,0.05)', display: 'flex', justifyContent: 'flex-end' }}>
+              <button
+                onClick={() => setPaymentChoiceModal({ open: false, deal: null, walletBalance: 0, canUseWallet: false })}
+                style={{ padding: '10px 20px', borderRadius: 9, border: '1px solid rgba(255,255,255,0.1)', background: 'transparent', color: '#e5e7eb', cursor: 'pointer', fontWeight: 600, fontSize: '0.9rem' }}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {incrementModal.open && incrementModal.listing && (
+        <div onClick={() => setIncrementModal({ open: false, listing: null, myBid: null, topBid: null })} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.75)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 2000, backdropFilter: 'blur(4px)', padding: 20 }}>
+          <div onClick={e => e.stopPropagation()} style={{ background: '#1a1a2e', borderRadius: 16, maxWidth: 460, width: '100%', border: '1px solid rgba(251,191,36,0.3)', overflow: 'hidden' }}>
+            <div style={{ padding: '20px 24px', background: 'linear-gradient(135deg, rgba(251,191,36,0.15), rgba(139,92,246,0.08))', borderBottom: '1px solid rgba(251,191,36,0.2)', display: 'flex', alignItems: 'center', gap: 12 }}>
+              <div style={{ width: 44, height: 44, borderRadius: '50%', background: 'rgba(251,191,36,0.2)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '1.4rem', color: '#fbbf24' }}>🏆</div>
+              <div style={{ flex: 1 }}>
+                <h3 style={{ margin: 0, color: 'white', fontSize: '1.1rem' }}>{incrementModal.myBid ? 'Increase Your Bid' : 'Place Your Bid'}</h3>
+                <p style={{ margin: '2px 0 0', color: '#9ca3af', fontSize: '0.8rem' }}>{incrementModal.listing.material} ({incrementModal.listing.quantity}kg)</p>
+              </div>
+            </div>
+
+            <div style={{ padding: '20px 24px' }}>
+              {incrementModal.topBid && (
+                <div style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.06)', borderRadius: 10, padding: '12px 16px', marginBottom: 16 }}>
+                  <div style={{ fontSize: '0.72rem', color: '#9ca3af', marginBottom: 4 }}>Current Highest Bid</div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span style={{ color: '#fbbf24', fontWeight: 700, fontSize: '1.1rem' }}>₹{incrementModal.topBid.amount}/kg</span>
+                    <span style={{ fontSize: '0.75rem', color: '#9ca3af' }}>by {incrementModal.topBid.buyerName}</span>
+                  </div>
+                </div>
+              )}
+
+              {incrementModal.myBid && (
+                <div style={{ background: 'rgba(99,102,241,0.08)', border: '1px solid rgba(99,102,241,0.2)', borderRadius: 10, padding: '12px 16px', marginBottom: 16 }}>
+                  <div style={{ fontSize: '0.72rem', color: '#a78bfa', marginBottom: 4 }}>Your Current Bid</div>
+                  <div style={{ color: '#fff', fontWeight: 700, fontSize: '1rem' }}>₹{incrementModal.myBid.amount}/kg</div>
+                </div>
+              )}
+
+              <div className="bd-form-group">
+                <label>New Bid Amount (₹/kg) *</label>
+                <input type="number" className="bd-form-input" value={newBidAmount} onChange={(e) => setNewBidAmount(e.target.value)} min={incrementModal.listing.minBidPrice || 0} placeholder={`Min ₹${incrementModal.listing.minBidPrice || 0}`} />
+                <small style={{ color: '#6b7280', fontSize: '0.72rem', display: 'block', marginTop: 4 }}>
+                  <i className="fas fa-info-circle me-1"></i>
+                  Minimum: ₹{incrementModal.listing.minBidPrice || 0}/kg
+                  {incrementModal.topBid && ` · Must be > ₹${incrementModal.topBid.amount}/kg`}
+                </small>
+              </div>
+
+              {incrementModal.topBid && (
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 14 }}>
+                  {[1, 5, 10, 25].map(inc => (
+                    <button key={inc} type="button" onClick={() => setNewBidAmount(String(incrementModal.topBid.amount + inc))} style={{ padding: '6px 14px', borderRadius: 8, border: '1px solid rgba(251,191,36,0.3)', background: 'rgba(251,191,36,0.08)', color: '#fbbf24', cursor: 'pointer', fontWeight: 600, fontSize: '0.75rem' }}>
+                      +₹{inc}
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {bidError && (
+                <div style={{ background: 'rgba(248,113,113,0.1)', border: '1px solid rgba(248,113,113,0.3)', color: '#f87171', padding: '10px 14px', borderRadius: 9, fontSize: '0.82rem', marginBottom: 14 }}>
+                  ⚠️ {bidError}
+                </div>
+              )}
+            </div>
+
+            <div style={{ padding: '16px 24px', borderTop: '1px solid rgba(255,255,255,0.05)', display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+              <button onClick={() => setIncrementModal({ open: false, listing: null, myBid: null, topBid: null })} disabled={bidUpdating} style={{ padding: '10px 20px', borderRadius: 9, border: '1px solid rgba(255,255,255,0.1)', background: 'transparent', color: '#e5e7eb', cursor: bidUpdating ? 'not-allowed' : 'pointer', fontWeight: 600, fontSize: '0.9rem' }}>Cancel</button>
+              <button
+                onClick={() => {
+                  if (!newBidAmount || Number(newBidAmount) <= 0) { setBidError('Enter a valid amount'); return; }
+                  if (incrementModal.myBid) { updateBid(incrementModal.listing, incrementModal.myBid.id, newBidAmount); }
+                  else { placeBid(incrementModal.listing, newBidAmount); }
+                }}
+                disabled={bidUpdating}
+                style={{ padding: '10px 24px', borderRadius: 9, border: 'none', background: bidUpdating ? '#4b5563' : 'linear-gradient(135deg, #fbbf24, #f59e0b)', color: 'white', cursor: bidUpdating ? 'not-allowed' : 'pointer', fontWeight: 700, fontSize: '0.9rem', display: 'inline-flex', alignItems: 'center', gap: 6 }}
+              >
+                {bidUpdating ? <><i className="fas fa-spinner fa-spin"></i> Processing...</> : <><i className="fas fa-gavel"></i> {incrementModal.myBid ? 'Update Bid' : 'Place Bid'}</>}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <RazorpayPaymentModal
+        open={razorpayModal.open}
+        amount={razorpayModal.deal?.buyerTotalPayment || razorpayModal.amount || 0}
+        purpose={razorpayModal.mode === 'wallet_topup' ? 'wallet_topup' : 'deal_payment'}
+        dealId={razorpayModal.deal?._id}
+        title={razorpayModal.mode === 'wallet_topup' ? 'Add Money to Wallet' : `Accept Offer - ${razorpayModal.deal?.material || ''}`}
+        onClose={() => setRazorpayModal({ open: false, deal: null, mode: null, amount: 0 })}
+        onSuccess={async (paymentId, response) => {
+          const { deal, mode, amount: topupAmount } = razorpayModal;
+          try {
+            if (mode === 'wallet_topup') {
+              const res = await API.post('/wallet/razorpay-add', {
+                amount: topupAmount,
+                razorpay_order_id: response.razorpay_order_id,
+                razorpay_payment_id: response.razorpay_payment_id,
+                razorpay_signature: response.razorpay_signature
+              });
+              const u = { ...user, walletBalance: res.data.newBalance };
+              localStorage.setItem('currentUser', JSON.stringify(u));
+              setUser(u);
+              setAddMoneyAmount('');
+              setRazorpayModal({ open: false, deal: null, mode: null, amount: 0 });
+              alert(`✅ ₹${topupAmount.toLocaleString('en-IN')} added!\nNew balance: ₹${res.data.newBalance.toLocaleString('en-IN')}`);
+              await fetchData();
+            } else {
+              const res = await API.put(`/deals/${deal._id}/accept-razorpay`, {
+                razorpay_order_id: response.razorpay_order_id,
+                razorpay_payment_id: response.razorpay_payment_id,
+                razorpay_signature: response.razorpay_signature
+              });
+              setDeals(deals.map(d => d._id === deal._id ? res.data : d));
+              setRazorpayModal({ open: false, deal: null, mode: null, amount: 0 });
+              alert(`✅ Payment successful!\nPayment ID: ${paymentId}\n\nDeal accepted!`);
+              await fetchData();
+            }
+          } catch (err) {
+            alert('❌ Failed: ' + (err.response?.data?.msg || err.message));
+          }
+        }}
+      />
 
       <style>{`
         * { box-sizing: border-box; }
@@ -1628,8 +2691,26 @@ const BuyerDashboard = () => {
         .bd-form-group label { display: block; margin-bottom: 6px; font-size: 0.78rem; color: #d1d5db; font-weight: 500; }
         .bd-form-input { width: 100%; padding: 9px 12px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.08); background: rgba(255,255,255,0.04); color: white; font-size: 0.85rem; }
         .bd-form-input:focus { outline: none; border-color: #6366f1; }
+        
+        /* ✅ Custom Select Dropdown Styling for Clear Visibility */
+        select.bd-form-input {
+          appearance: none;
+          background-image: url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23a78bfa' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3e%3cpolyline points='6 9 12 15 18 9'%3e%3c/polyline%3e%3c/svg%3e");
+          background-repeat: no-repeat;
+          background-position: right 12px center;
+          background-size: 16px;
+          padding-right: 36px;
+          cursor: pointer;
+        }
+        .bd-form-input option {
+          background-color: #1a1a2e;
+          color: #ffffff;
+          padding: 10px;
+        }
+
         .bd-location-input { margin-top: 10px; }
         .bd-form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+        .bd-form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; }
         .bd-error-text { color: #f87171; font-size: 0.7rem; margin-top: 4px; display: block; }
         .bd-dropzone { border: 2px dashed rgba(255,255,255,0.1); border-radius: 10px; padding: 24px; text-align: center; cursor: pointer; color: #9ca3af; transition: 0.15s; background: rgba(255,255,255,0.02); }
         .bd-dropzone:hover { border-color: #6366f1; background: rgba(99,102,241,0.04); color: #c7d2fe; }
@@ -1672,15 +2753,69 @@ const BuyerDashboard = () => {
         .bd-chat-input { display: flex; gap: 10px; padding: 14px 16px; border-top: 1px solid rgba(255,255,255,0.05); }
         .bd-chat-input input { flex: 1; padding: 9px 14px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.08); background: rgba(255,255,255,0.04); color: white; font-size: 0.85rem; }
         .bd-profile { max-width: 540px; margin: 0 auto; }
-        .bd-profile form { background: rgba(255,255,255,0.02); padding: 28px; border-radius: 14px; border: 1px solid rgba(255,255,255,0.05); }
-        .bd-profile-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+        .bd-profile form { }
+        .bd-profile-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; flex-wrap: wrap; gap: 12px; }
         .bd-profile-header h2 { margin: 0; font-size: 1.15rem; }
         .bd-modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; z-index: 1000; backdrop-filter: blur(4px); padding: 20px; }
         .bd-modal-content { background: #1a1a2e; padding: 24px; border-radius: 14px; max-width: 440px; width: 100%; border: 1px solid rgba(255,255,255,0.08); max-height: 90vh; overflow-y: auto; }
         .bd-modal-content h3 { margin-top: 0; margin-bottom: 18px; color: #60a5fa; font-size: 1.05rem; }
         .bd-modal-actions { display: flex; gap: 10px; margin-top: 18px; }
         .bd-modal-actions .bd-btn-secondary, .bd-modal-actions .bd-btn-primary { flex: 1; }
-        .bd-loading { min-height: 100vh; display: flex; align-items: center; justify-content: center; color: #9ca3af; font-size: 0.9rem; }
+
+        /* ✅ Requests Sent status tabs */
+        .bd-status-tabs {
+          display: flex;
+          gap: 8px;
+          margin-bottom: 18px;
+          flex-wrap: wrap;
+          padding: 6px;
+          background: rgba(255,255,255,0.03);
+          border-radius: 12px;
+          border: 1px solid rgba(255,255,255,0.05);
+          width: fit-content;
+        }
+        .bd-status-tab {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          padding: 8px 14px;
+          border-radius: 8px;
+          border: 2px solid transparent;
+          background: transparent;
+          cursor: pointer;
+          font-size: 0.8rem;
+          font-weight: 600;
+          transition: all 0.15s;
+          color: #9ca3af;
+        }
+        .bd-status-tab:hover { background: rgba(255,255,255,0.04); }
+        .bd-status-tab.active { background: rgba(255,255,255,0.05); }
+        .bd-status-tab-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+        .bd-status-tab-count {
+          padding: 2px 8px; border-radius: 999px;
+          background: rgba(255,255,255,0.05);
+          font-size: 0.7rem; font-weight: 700;
+        }
+
+        /* ✅ ROTATING LOGO LOADING ANIMATION */
+        .bd-loading-container { position: fixed; inset: 0; background: #0a0a0f; display: flex; align-items: center; justify-content: center; z-index: 99999; }
+        [data-theme="light"] .bd-loading-container { background: #f8fafc; }
+        .bd-loading-logo-wrap { display: flex; flex-direction: column; align-items: center; gap: 20px; }
+        .bd-loading-logo-ring { position: relative; width: 120px; height: 120px; display: flex; align-items: center; justify-content: center; }
+        .bd-loading-logo-ring::before { content: ''; position: absolute; inset: 0; border-radius: 50%; border: 3px solid transparent; border-top-color: #6366f1; border-right-color: #8b5cf6; animation: bd-spin-ring 1.2s linear infinite; }
+        .bd-loading-logo-ring::after { content: ''; position: absolute; inset: 10px; border-radius: 50%; border: 2px solid transparent; border-top-color: #60a5fa; border-left-color: #a78bfa; animation: bd-spin-ring 1.8s linear infinite reverse; }
+        .bd-loading-logo-inner { width: 80px; height: 80px; border-radius: 20px; background: linear-gradient(135deg, #6366f1, #8b5cf6); display: flex; align-items: center; justify-content: center; font-size: 2.4rem; color: white; box-shadow: 0 0 40px rgba(99,102,241,0.5); animation: bd-logo-breathe 2s ease-in-out infinite; }
+        @keyframes bd-spin-ring { to { transform: rotate(360deg); } }
+        @keyframes bd-logo-breathe { 0%, 100% { transform: scale(1); box-shadow: 0 0 40px rgba(99,102,241,0.5); } 50% { transform: scale(1.08); box-shadow: 0 0 60px rgba(99,102,241,0.8); } }
+        .bd-loading-text { font-size: 1.5rem; font-weight: 800; background: linear-gradient(135deg, #a78bfa, #60a5fa); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; letter-spacing: -0.5px; margin: 0; animation: bd-text-pulse 2s ease-in-out infinite; }
+        @keyframes bd-text-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
+        .bd-loading-tagline { color: #6b7280; font-size: 0.85rem; letter-spacing: 0.5px; margin-top: -12px; }
+        .bd-loading-dots { display: flex; gap: 6px; margin-top: 8px; }
+        .bd-loading-dots span { width: 8px; height: 8px; border-radius: 50%; background: #6366f1; animation: bd-dot-bounce 1.4s ease-in-out infinite; }
+        .bd-loading-dots span:nth-child(2) { animation-delay: 0.2s; background: #8b5cf6; }
+        .bd-loading-dots span:nth-child(3) { animation-delay: 0.4s; background: #60a5fa; }
+        @keyframes bd-dot-bounce { 0%, 80%, 100% { transform: translateY(0); opacity: 0.5; } 40% { transform: translateY(-10px); opacity: 1; } }
+
         @media (max-width: 900px) {
           .bd-dashboard-columns { grid-template-columns: 1fr; }
           .bd-messages-grid { grid-template-columns: 1fr; height: auto; }

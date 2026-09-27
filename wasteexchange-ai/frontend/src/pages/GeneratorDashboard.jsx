@@ -8,6 +8,8 @@ import API from '../utils/api';
 import { wasteCategories, mainCategories } from '../utils/wasteData';
 import Chart from 'chart.js/auto';
 import 'leaflet/dist/leaflet.css';
+import ThemeToggle from '../components/ThemeToggle';
+import { useDialog } from '../context/DialogContext';
 
 // ----- Helpers -----
 const KpiCard = ({ label, value, color, icon }) => (
@@ -107,15 +109,61 @@ const GeneratorDashboard = () => {
   const [selectedListingForOffer, setSelectedListingForOffer] = useState(null);
   const [matchingListings, setMatchingListings] = useState([]);
 
+  const [aiRecommendedClients, setAiRecommendedClients] = useState([]);
+  const [aiRecLoading, setAiRecLoading] = useState(false);
+
+  const [withdrawals, setWithdrawals] = useState([]);
+  const [withdrawAmount, setWithdrawAmount] = useState('');
+  const [withdrawMethod, setWithdrawMethod] = useState('upi');
+  const [withdrawUPI, setWithdrawUPI] = useState('');
+  const [withdrawBank, setWithdrawBank] = useState({
+    accountHolder: '',
+    accountNumber: '',
+    ifscCode: '',
+    bankName: ''
+  });
+  const [withdrawError, setWithdrawError] = useState('');
+  const [withdrawLoading, setWithdrawLoading] = useState(false);
+
+  const materialChartRef = useRef(null);
+  const materialChartInstance = useRef(null);
+
+  const { showAlert, showSuccess, showError, showConfirm, showDanger } = useDialog();
+
   useEffect(() => {
     const token = localStorage.getItem('token');
-    if (!token) { navigate('/login'); return; }
-    const currentUser = JSON.parse(localStorage.getItem('currentUser'));
-    if (!currentUser || currentUser.role !== 'generator') { navigate('/login'); return; }
-    if (!currentUser.isCompanyVerified) { navigate('/waiting'); return; }
+    if (!token) {
+      setLoading(false);
+      navigate('/login', { replace: true });
+      return;
+    }
+
+    const currentUser = JSON.parse(localStorage.getItem('currentUser') || '{}');
+
+    // 🚫 ADMIN goes to /admin
+    if (currentUser.role === 'admin') {
+      setLoading(false);
+      navigate('/admin', { replace: true });
+      return;
+    }
+
+    // 🚫 Wrong role
+    if (currentUser.role !== 'generator') {
+      setLoading(false);
+      navigate('/login', { replace: true });
+      return;
+    }
+
+    if (!currentUser.isCompanyVerified) {
+      setLoading(false);
+      navigate('/waiting', { replace: true });
+      return;
+    }
+
+    // ✅ All good
     setUser(currentUser);
     if (currentUser.profilePhoto) setProfilePhoto(currentUser.profilePhoto);
-    setProfileForm({ name: currentUser.name, email: currentUser.email, password: '' });
+    setProfileForm({ ...currentUser, password: '' });
     fetchData();
   }, [navigate]);
 
@@ -126,13 +174,14 @@ const GeneratorDashboard = () => {
         API.get('/listings/user'),
         API.get('/requirements'),
         API.get('/deals/user'),
-        API.get('/messages/user')
+        API.get('/messages/user'),
+        API.get('/wallet/withdrawals')
       ]);
 
       if (results[0].status === 'fulfilled') setListings(results[0].value.data || []);
       else setListings([]);
 
-      if (results[1].status === 'fulfilled') setRequirements((results[1].value.data || []).filter(r => r.status === 'open'));
+      if (results[1].status === 'fulfilled') setRequirements(results[1].value.data || []);  // ✅ All requirements
       else setRequirements([]);
 
       if (results[2].status === 'fulfilled') setDeals(results[2].value.data || []);
@@ -140,6 +189,10 @@ const GeneratorDashboard = () => {
 
       if (results[3].status === 'fulfilled') setMessages(results[3].value.data || []);
       else setMessages([]);
+
+      // ✅ NEW
+      if (results[4].status === 'fulfilled') setWithdrawals(results[4].value.data || []);
+      else setWithdrawals([]);
 
       await loadBids();
     } catch (err) { console.error('❌ fetchData error:', err); }
@@ -161,29 +214,59 @@ const GeneratorDashboard = () => {
   };
 
   const handleAcceptBid = async (listingId, bidId) => {
-    if (!window.confirm('Accept this bid?')) return;
+    const ok = await showConfirm(
+      'This bid will be accepted and a deal will be created with the winning buyer.',
+      { title: 'Accept Bid?', confirmText: 'Accept Bid' }
+    );
+    if (!ok) return;
     try {
       const res = await API.post(`/listings/${listingId}/bids/${bidId}/accept`);
-      alert('✅ Bid accepted! Deal created.');
+      showSuccess('Bid accepted! Deal created with the buyer.');
       if (res?.data?.deal) setDeals(prev => [...prev, res.data.deal]);
       await loadBids();
       await fetchListingsOnly();
     } catch (err) {
-      alert('❌ Failed: ' + (err.response?.data?.msg || err.message));
+      showError(err.response?.data?.msg || err.message);
     }
   };
 
   const handleRejectBid = async (listingId, bidId) => {
-    if (!window.confirm('Reject this bid?')) return;
+    const ok = await showDanger(
+      'This bid will be rejected and the buyer will be notified.',
+      { title: 'Reject Bid?', confirmText: 'Reject' }
+    );
+    if (!ok) return;
     try {
       await API.post(`/listings/${listingId}/bids/${bidId}/reject`);
+      showSuccess('Bid rejected.');
       await loadBids();
-    } catch (err) { alert('❌ Failed to reject bid'); }
+    } catch (err) {
+      showError(err.response?.data?.msg || err.message);
+    }
   };
 
   // ✅ Handle buyer contact (find matching listings)
-  const handleContactBuyer = (requirement) => {
+  const handleContactBuyer = async (requirement) => {
+    if (requirement.status === 'fulfilled') {
+      showError('This requirement is already fulfilled.', 'Cannot Send Offer');
+      return;
+    }
+
     const currentUserId = String(user?._id || user?.id || '');
+
+    const existingOffer = deals.find(d =>
+      String(d.requirementId) === String(requirement._id) &&
+      String(d.generatorId) === currentUserId &&
+      (d.status === 'offered' || d.status === 'requested' || d.status === 'accepted' || d.status === 'completed')
+    );
+    if (existingOffer) {
+      showAlert(
+        `You already sent an offer for this requirement.\n\nCurrent Status: ${existingOffer.status.toUpperCase()}\n\nWait for the buyer's response.`,
+        { title: 'Offer Already Sent', type: 'warning' }
+      );
+      return;
+    }
+
     const matched = listings.filter(l => {
       const listingGenId = String(l.generatorId?._id || l.generatorId || '');
       const matMatch = (l.material || '').toLowerCase() === (requirement.material || '').toLowerCase();
@@ -192,7 +275,10 @@ const GeneratorDashboard = () => {
     });
 
     if (matched.length === 0) {
-      alert(`❌ You don't have any active or pending listing for "${requirement.material}".\n\nPlease create a matching listing first.`);
+      showAlert(
+        `You don't have any active or pending listing for "${requirement.material}".\n\nPlease create a matching listing first.`,
+        { title: 'No Matching Listing', type: 'warning' }
+      );
       setActivePage('create');
       return;
     }
@@ -206,10 +292,16 @@ const GeneratorDashboard = () => {
   const confirmSendOffer = async () => {
     if (!offerRequirement || !selectedListingForOffer) return;
     try {
-      // ✅ YE endpoint use karo, /deals nahi
+      console.log('📤 Sending offer:', {
+        listingId: selectedListingForOffer._id,
+        buyerId: offerRequirement.buyerId,
+        buyerName: offerRequirement.buyerName
+      });
+
       await API.post('/deals/offer', {
         listingId: selectedListingForOffer._id,
-        buyerId: offerRequirement.buyerId  // ✅ buyerId zaroori hai
+        buyerId: offerRequirement.buyerId,
+        requirementId: offerRequirement._id  // ✅ NEW - link requirement
       });
 
       const [dealsRes, listingsRes] = await Promise.all([
@@ -222,14 +314,14 @@ const GeneratorDashboard = () => {
       try {
         await API.post('/messages', {
           receiverName: offerRequirement.buyerName,
-          content: `Hi ${offerRequirement.buyerName}, I saw your requirement for ${offerRequirement.material}. I have a matching listing. Let's connect!`
+          content: `Hi ${offerRequirement.buyerName}, I saw your requirement for ${offerRequirement.material} (${offerRequirement.minQty}-${offerRequirement.maxQty}kg). I have a matching listing (${selectedListingForOffer.quantity}kg @ ₹${selectedListingForOffer.price}/kg). Let's connect!`
         });
-      } catch (e) { }
+      } catch (e) { /* ignore */ }
 
       setOfferRequirement(null);
       setMatchingListings([]);
       setSelectedListingForOffer(null);
-      alert(`✅ Offer sent to ${offerRequirement.buyerName}!`);
+      showSuccess(`Offer sent to ${offerRequirement.buyerName}!\n\nThey will see it in their Deals tab.`, 'Offer Sent');
     } catch (err) {
       alert('❌ Failed to send offer: ' + (err.response?.data?.msg || err.message));
     }
@@ -242,12 +334,33 @@ const GeneratorDashboard = () => {
   const currentUserId = String(user?._id || user?.id || '');
   const completedDeals = deals.filter(d => String(d.generatorId) === currentUserId && d.status === 'completed').length;
 
-  const monthlyListings = [12, 19, 8, 15, 12, 17, 10, 14, 16, 12, 10, 15];
+  // ✅ Dynamic monthly listings from actual data
+  const monthlyListings = (() => {
+    const counts = Array(12).fill(0);
+    listings.forEach(l => {
+      if (!l.createdAt) return;
+      const m = new Date(l.createdAt).getMonth();
+      if (m >= 0 && m < 12) counts[m]++;
+    });
+    return counts;
+  })();
+
+  // ✅ Material distribution from actual data
+  const materialDistribution = (() => {
+    const dist = {};
+    listings.forEach(l => {
+      const mat = l.aiCategory || l.material || 'Other';
+      dist[mat] = (dist[mat] || 0) + 1;
+    });
+    return dist;
+  })();
 
   const initChart = useCallback(() => {
     if (!chartRef.current) return;
     if (chartInstanceRef.current) { chartInstanceRef.current.destroy(); chartInstanceRef.current = null; }
     const ctx = chartRef.current.getContext('2d');
+    const isLight = document.documentElement.getAttribute('data-theme') === 'light';
+
     chartInstanceRef.current = new Chart(ctx, {
       type: 'bar',
       data: {
@@ -255,83 +368,224 @@ const GeneratorDashboard = () => {
         datasets: [{
           label: 'New Listings',
           data: monthlyListings,
-          backgroundColor: 'rgba(99,102,241,0.75)',
+          backgroundColor: monthlyListings.map(v => v > 0 ? 'rgba(99,102,241,0.85)' : 'rgba(99,102,241,0.2)'),
           borderColor: '#6366f1',
           borderWidth: 2,
           borderRadius: 6,
+          maxBarThickness: 40,
         }],
       },
       options: {
-        responsive: true, maintainAspectRatio: false,
-        plugins: { legend: { labels: { color: '#9ca3af' } } },
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: {
+            labels: { color: isLight ? '#475569' : '#9ca3af', font: { size: 12 } }
+          },
+          tooltip: {
+            callbacks: {
+              label: (c) => `${c.raw} listing(s)`
+            }
+          }
+        },
         scales: {
-          y: { beginAtZero: true, grid: { color: 'rgba(255,255,255,0.05)' } },
-          x: { grid: { display: false } },
+          y: {
+            beginAtZero: true,
+            suggestedMax: Math.max(5, ...monthlyListings) + 1,
+            ticks: {
+              stepSize: 1,
+              color: isLight ? '#64748b' : '#9ca3af',
+              font: { size: 11 }
+            },
+            grid: { color: isLight ? 'rgba(0,0,0,0.05)' : 'rgba(255,255,255,0.05)' }
+          },
+          x: {
+            ticks: { color: isLight ? '#64748b' : '#9ca3af', font: { size: 11 } },
+            grid: { display: false }
+          },
         },
       },
     });
-  }, []);
+  }, [monthlyListings]);
+
+  const initMaterialChart = useCallback(() => {
+    if (!materialChartRef.current) return;
+    if (materialChartInstance.current) {
+      materialChartInstance.current.destroy();
+      materialChartInstance.current = null;
+    }
+    if (Object.keys(materialDistribution).length === 0) return;
+
+    const ctx = materialChartRef.current.getContext('2d');
+    const labels = Object.keys(materialDistribution);
+    const data = Object.values(materialDistribution);
+
+    const COLORS = {
+      'Plastic': '#6366f1',
+      'Metal': '#f59e0b',
+      'Paper': '#22c55e',
+      'Textile': '#ec4899',
+      'Wood': '#8b5cf6',
+      'Glass': '#06b6d4',
+      'Rubber': '#ef4444',
+      'E-waste': '#84cc16',
+      'Organic': '#10b981',
+      'Other': '#94a3b8'
+    };
+
+    const bgColors = labels.map(l => COLORS[l] || '#94a3b8');
+
+    materialChartInstance.current = new Chart(ctx, {
+      type: 'doughnut',
+      data: {
+        labels: labels,
+        datasets: [{
+          data: data,
+          backgroundColor: bgColors,
+          borderWidth: 2,
+          borderColor: '#0a0a0f',
+          hoverOffset: 12,
+        }],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: {
+            position: 'right',
+            labels: {
+              color: '#d1d5db',
+              padding: 14,
+              usePointStyle: true,
+              font: { size: 11 }
+            }
+          },
+          tooltip: {
+            callbacks: {
+              label: (c) => `${c.label}: ${c.raw} listing(s)`
+            }
+          }
+        }
+      }
+    });
+  }, [materialDistribution]);
 
   useEffect(() => {
-    if (activePage === 'dashboard' && !loading && chartRef.current) {
-      const timer = setTimeout(initChart, 100);
+    if (activePage === 'dashboard' && !loading) {
+      const timer = setTimeout(() => {
+        initChart();
+        initMaterialChart();
+      }, 100);
       return () => clearTimeout(timer);
     }
     return () => {
-      if (activePage !== 'dashboard' && chartInstanceRef.current) {
-        chartInstanceRef.current.destroy();
-        chartInstanceRef.current = null;
+      if (activePage !== 'dashboard') {
+        if (chartInstanceRef.current) { chartInstanceRef.current.destroy(); chartInstanceRef.current = null; }
+        if (materialChartInstance.current) { materialChartInstance.current.destroy(); materialChartInstance.current = null; }
       }
     };
-  }, [activePage, loading, initChart]);
+  }, [activePage, loading, initChart, initMaterialChart]);
 
   // Filters
-  const filteredRequirements = requirements.filter(r => {
-    const matchSearch = r.material.toLowerCase().includes(searchTerm.toLowerCase());
-    const matchMat = filterMaterial ? r.material.toLowerCase().includes(filterMaterial.toLowerCase()) : true;
-    const matchLoc = filterLocation ? r.location.toLowerCase().includes(filterLocation.toLowerCase()) : true;
-    const matchMinPrice = filterMinPrice ? r.maxPrice >= Number(filterMinPrice) : true;
-    const matchMaxPrice = filterMaxPrice ? r.maxPrice <= Number(filterMaxPrice) : true;
-    const matchMinQty = filterMinQty ? r.maxQty >= Number(filterMinQty) : true;
-    const matchMaxQty = filterMaxQty ? r.minQty <= Number(filterMaxQty) : true;
-    return matchSearch && matchMat && matchLoc && matchMinPrice && matchMaxPrice && matchMinQty && matchMaxQty;
-  });
+  const filteredRequirements = requirements
+    .filter(r => {
+      const matchSearch = r.material.toLowerCase().includes(searchTerm.toLowerCase());
+      const matchMat = filterMaterial ? r.material.toLowerCase().includes(filterMaterial.toLowerCase()) : true;
+      const matchLoc = filterLocation ? r.location.toLowerCase().includes(filterLocation.toLowerCase()) : true;
+      const matchMinPrice = filterMinPrice ? r.maxPrice >= Number(filterMinPrice) : true;
+      const matchMaxPrice = filterMaxPrice ? r.maxPrice <= Number(filterMaxPrice) : true;
+      const matchMinQty = filterMinQty ? r.maxQty >= Number(filterMinQty) : true;
+      const matchMaxQty = filterMaxQty ? r.minQty <= Number(filterMaxQty) : true;
+      return matchSearch && matchMat && matchLoc && matchMinPrice && matchMaxPrice && matchMinQty && matchMaxQty;
+    })
+    // ✅ Latest first (sort by createdAt DESC)
+    .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
   const totalPages = Math.ceil(filteredRequirements.length / itemsPerPage);
   const paginatedRequirements = filteredRequirements.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage);
 
-  // AI Matches
-  const calculateMatch = (listing, req) => {
-    const text1 = (listing.material + ' ' + (listing.description || '')).toLowerCase();
-    const text2 = req.material.toLowerCase();
-    const words1 = text1.split(/\s+/);
-    const words2 = text2.split(/\s+/);
-    const common = words1.filter(w => words2.includes(w) && w.length > 2);
-    const textSim = Math.min(100, (common.length / Math.max(1, words2.length)) * 100);
-    const qty = listing.quantity;
-    let qtyScore = 0;
-    if (qty >= req.minQty && qty <= req.maxQty) qtyScore = 100;
-    else if (qty > req.maxQty) qtyScore = Math.max(0, 100 - ((qty - req.maxQty) / req.maxQty) * 50);
-    else qtyScore = Math.max(0, 100 - ((req.minQty - qty) / req.minQty) * 50);
-    const priceScore = listing.price <= req.maxPrice ? 100 : Math.max(0, 100 - ((listing.price - req.maxPrice) / req.maxPrice) * 100);
-    const locScore = listing.location.toLowerCase() === req.location.toLowerCase() ? 100 : 50;
-    const condScore = listing.description?.toLowerCase().includes('good') ? 100 : 70;
-    const weights = { text: 0.30, qty: 0.25, price: 0.20, loc: 0.15, cond: 0.10 };
-    return Math.round((textSim * weights.text) + (qtyScore * weights.qty) + (priceScore * weights.price) + (locScore * weights.loc) + (condScore * weights.cond));
+  // // AI Matches
+  // const calculateMatch = (listing, req) => {
+  //   const text1 = (listing.material + ' ' + (listing.description || '')).toLowerCase();
+  //   const text2 = req.material.toLowerCase();
+  //   const words1 = text1.split(/\s+/);
+  //   const words2 = text2.split(/\s+/);
+  //   const common = words1.filter(w => words2.includes(w) && w.length > 2);
+  //   const textSim = Math.min(100, (common.length / Math.max(1, words2.length)) * 100);
+  //   const qty = listing.quantity;
+  //   let qtyScore = 0;
+  //   if (qty >= req.minQty && qty <= req.maxQty) qtyScore = 100;
+  //   else if (qty > req.maxQty) qtyScore = Math.max(0, 100 - ((qty - req.maxQty) / req.maxQty) * 50);
+  //   else qtyScore = Math.max(0, 100 - ((req.minQty - qty) / req.minQty) * 50);
+  //   const priceScore = listing.price <= req.maxPrice ? 100 : Math.max(0, 100 - ((listing.price - req.maxPrice) / req.maxPrice) * 100);
+  //   const locScore = listing.location.toLowerCase() === req.location.toLowerCase() ? 100 : 50;
+  //   const condScore = listing.description?.toLowerCase().includes('good') ? 100 : 70;
+  //   const weights = { text: 0.30, qty: 0.25, price: 0.20, loc: 0.15, cond: 0.10 };
+  //   return Math.round((textSim * weights.text) + (qtyScore * weights.qty) + (priceScore * weights.price) + (locScore * weights.loc) + (condScore * weights.cond));
+  // };
+
+  // const getAIMatches = () => {
+  //   const currentUserId = String(user?._id || user?.id || '');
+  //   const myListings = listings.filter(l => String(l.generatorId) === currentUserId && (l.status === 'active' || l.status === 'pending'));
+  //   const openReqs = requirements.filter(r => r.status === 'open');
+  //   const results = [];
+  //   myListings.forEach(listing => {
+  //     openReqs.forEach(req => {
+  //       const score = calculateMatch(listing, req);
+  //       if (score > 30) results.push({ ...req, listingId: listing._id, listingMaterial: listing.material, matchScore: score });
+  //     });
+  //   });
+  //   return results.sort((a, b) => b.matchScore - a.matchScore);
+  // };
+  // const aiMatches = getAIMatches();
+
+  // ✅ Fetch AI matches from backend
+  const fetchAIRecClients = async () => {
+    try {
+      setAiRecLoading(true);
+      console.log('🤖 Fetching AI recommended clients for generator');
+      const res = await API.post('/ai/recommend', { role: 'generator' });
+      let aiData = res.data || [];
+
+      // ✅ Merge fulfilled requirements from my past deals (so they show up too)
+      const cid = String(user?._id || user?.id || '');
+      const myCompletedDeals = deals.filter(d =>
+        String(d.generatorId) === cid &&
+        (d.status === 'completed' || d.status === 'accepted' || d.status === 'offered' || d.status === 'requested')
+      );
+
+      // Add fulfilled requirements that aren't already in AI matches
+      const existingIds = new Set(aiData.map(a => String(a._id)));
+      const extraFulfilled = [];
+
+      myCompletedDeals.forEach(d => {
+        const req = requirements.find(r => String(r._id) === String(d.requirementId));
+        if (req && !existingIds.has(String(req._id))) {
+          extraFulfilled.push({
+            ...req,
+            matchScore: 100,
+            textSimilarity: 100,
+            ruleScore: 100,
+            aiExplanation: [`Past interaction: Deal ${d.status}`]
+          });
+        }
+      });
+
+      setAiRecommendedClients([...aiData, ...extraFulfilled]);
+      console.log('✅ AI matches + past fulfilled:', aiData.length + extraFulfilled.length);
+    } catch (err) {
+      console.error('❌ AI recommend failed:', err.response?.data?.msg || err.message);
+      setAiRecommendedClients([]);
+    } finally {
+      setAiRecLoading(false);
+    }
   };
 
-  const getAIMatches = () => {
-    const myListings = listings.filter(l => String(l.generatorId) === user?._id && l.status === 'active');
-    const openReqs = requirements.filter(r => r.status === 'open');
-    const results = [];
-    myListings.forEach(listing => {
-      openReqs.forEach(req => {
-        const score = calculateMatch(listing, req);
-        if (score > 30) results.push({ ...req, listingId: listing._id, listingMaterial: listing.material, matchScore: score });
-      });
-    });
-    return results.sort((a, b) => b.matchScore - a.matchScore);
-  };
-  const aiMatches = getAIMatches();
+  // ✅ Trigger when tab changes
+  useEffect(() => {
+    if (activePage === 'findClients' && clientsTab === 'ai') {
+      fetchAIRecClients();
+    }
+  }, [activePage, clientsTab]);
 
   // Image upload
   const handleImageSelect = (fileList) => {
@@ -360,8 +614,8 @@ const GeneratorDashboard = () => {
     const file = e.target.files?.[0];
     e.target.value = '';
     if (!file) return;
-    if (!file.type.startsWith('image/')) { alert('Please choose an image file.'); return; }
-    if (file.size > MAX_IMAGE_SIZE) { alert('Image must be under 5MB.'); return; }
+    if (!file.type.startsWith('image/')) { showError('Please choose an image file.', 'Invalid File'); return; }
+    if (file.size > MAX_IMAGE_SIZE) { showError('Image must be under 5MB.', 'File Too Large'); return; }
     const reader = new FileReader();
     reader.onload = async () => {
       setProfilePhoto(reader.result);
@@ -375,7 +629,7 @@ const GeneratorDashboard = () => {
         setProfilePhoto(res.data?.profilePhoto || reader.result);
       } catch (err) { console.warn('Profile photo upload failed:', err.message); }
     };
-    reader.onerror = () => alert('Could not read that image.');
+    reader.onerror = () => showError('Could not read that image.', 'Error');
     reader.readAsDataURL(file);
   };
 
@@ -441,21 +695,30 @@ const GeneratorDashboard = () => {
       }
       setListings([...listings, res.data]);
       resetListingForm();
-      alert(`✅ Listing added! AI classified as: ${res.data.aiCategory || 'Other'} (${res.data.aiConfidence || 0}% confidence)`);
+      showSuccess(
+        `Listing added successfully!\n\nAI classified as: ${res.data.aiCategory || 'Other'}\nConfidence: ${res.data.aiConfidence || 0}%`,
+        'Listing Created'
+      );
       setCurrentPage(1);
       setActivePage('listings');
     } catch (err) {
-      alert('❌ Failed: ' + (err.response?.data?.msg || err.message));
+      showError(err.response?.data?.msg || err.message);
     }
   };
 
   const deleteListing = async (id) => {
-    if (!window.confirm('Delete this listing?')) return;
+    const ok = await showDanger(
+      'This listing will be permanently deleted along with all its bids and offers.',
+      { title: 'Delete Listing?', confirmText: 'Delete' }
+    );
+    if (!ok) return;
     try {
       await API.delete(`/listings/${id}`);
       setListings(listings.filter(l => l._id !== id));
-      alert('🗑️ Listing deleted.');
-    } catch (err) { alert('❌ Delete failed'); }
+      showSuccess('Listing deleted successfully.', 'Deleted');
+    } catch (err) {
+      showError(err.response?.data?.msg || err.message);
+    }
   };
 
   const openEditModal = (listing) => {
@@ -487,36 +750,109 @@ const GeneratorDashboard = () => {
         description: editForm.description,
       });
       setListings(listings.map(l => l._id === editingListing._id ? res.data : l));
-      alert('✅ Listing updated!');
+      showSuccess('Listing updated successfully.', 'Updated');
       closeEditModal();
     } catch (err) {
-      alert('❌ Update failed: ' + (err.response?.data?.msg || err.message));
+      showError(err.response?.data?.msg || err.message, 'Update Failed');
     }
   };
 
   const acceptDeal = async (dealId) => {
     try {
+      const deal = deals.find(d => d._id === dealId);
+      if (!deal) return;
+
+      const confirmMsg =
+        `Material: ${deal.material} (${deal.quantity}kg)\n\n` +
+        `Buyer pays: ₹${deal.buyerTotalPayment.toLocaleString('en-IN')}\n` +
+        `  (Material: ₹${deal.totalAmount.toLocaleString('en-IN')} + 2% buyer fee)\n\n` +
+        `You will receive: ₹${deal.generatorPayout.toLocaleString('en-IN')}\n` +
+        `  (After 2% platform fee: ₹${deal.generatorCommission})\n\n` +
+        `This will be credited to your wallet immediately.`;
+
+      const ok = await showConfirm(confirmMsg, {
+        title: 'Accept This Request?',
+        confirmText: 'Accept & Credit Wallet'
+      });
+      if (!ok) return;
+
       const res = await API.put(`/deals/${dealId}/accept`);
       setDeals(deals.map(d => d._id === dealId ? res.data : d));
-      alert('✅ Deal Accepted!');
-    } catch (err) { alert('❌ Failed: ' + (err.response?.data?.msg || err.message)); }
+
+      try {
+        const meRes = await API.get('/auth/me');
+        if (meRes.data?.user) {
+          const updatedUser = { ...user, walletBalance: meRes.data.user.walletBalance };
+          localStorage.setItem('currentUser', JSON.stringify(updatedUser));
+          setUser(updatedUser);
+        }
+      } catch (e) { console.warn('Wallet refresh failed:', e.message); }
+
+      showSuccess(
+        `Deal accepted!\n\n₹${deal.generatorPayout.toLocaleString('en-IN')} credited to your wallet.`,
+        'Deal Accepted'
+      );
+      await fetchData();
+    } catch (err) {
+      const errData = err.response?.data;
+      if (errData?.code === 'INSUFFICIENT_BALANCE') {
+        showError(`Buyer doesn't have enough balance.\n\n${errData.msg}`, 'Insufficient Balance');
+      } else {
+        showError(errData?.msg || err.message);
+      }
+    }
   };
 
   const completeDeal = async (dealId) => {
+    const ok = await showConfirm(
+      `Confirm only after the material has been handed over to the buyer.\n\nThis will close the deal permanently.`,
+      { title: 'Mark as Delivered?', confirmText: 'Yes, Mark Delivered' }
+    );
+    if (!ok) return;
     try {
       const res = await API.put(`/deals/${dealId}/complete`);
       setDeals(deals.map(d => d._id === dealId ? res.data : d));
-      alert('✅ Deal Completed!');
-    } catch (err) { alert('❌ Failed: ' + (err.response?.data?.msg || err.message)); }
+      showSuccess('Deal marked as delivered! Material handover complete.', 'Completed');
+    } catch (err) {
+      showError(err.response?.data?.msg || err.message);
+    }
+  };
+
+  const handleAutoAward = async (listing) => {
+    const sortedBids = [...(listing.bids || [])].sort((a, b) => b.amount - a.amount);
+    const topBid = sortedBids[0];
+
+    const ok = await showConfirm(
+      `Winner: ${topBid?.buyerName}\nAmount: ₹${topBid?.amount}/kg\nTotal: ₹${(listing.quantity * topBid?.amount).toLocaleString('en-IN')}\n\nThis will create a deal and notify the buyer.`,
+      { title: `Award "${listing.material}"?`, confirmText: 'Award to Winner' }
+    );
+    if (!ok) return;
+
+    try {
+      const res = await API.post(`/listings/${listing._id}/bids/auto-award`);
+      showSuccess(res.data.msg, '🏆 Awarded');
+      await loadBids();
+      await fetchListingsOnly();
+      const dealsRes = await API.get('/deals/user');
+      setDeals(dealsRes.data);
+    } catch (err) {
+      showError(err.response?.data?.msg || err.message);
+    }
   };
 
   const rejectDeal = async (dealId) => {
-    if (!window.confirm('Reject this deal?')) return;
+    const ok = await showDanger(
+      'This request will be rejected and the listing will become available again.',
+      { title: 'Reject Deal?', confirmText: 'Reject' }
+    );
+    if (!ok) return;
     try {
       const res = await API.put(`/deals/${dealId}/reject`);
       setDeals(deals.map(d => d._id === dealId ? res.data : d));
-      alert('✅ Deal rejected');
-    } catch (err) { alert('❌ Failed: ' + (err.response?.data?.msg || err.message)); }
+      showSuccess('Deal rejected.', 'Rejected');
+    } catch (err) {
+      showError(err.response?.data?.msg || err.message);
+    }
   };
 
   const handleAddMoney = async () => {
@@ -531,31 +867,108 @@ const GeneratorDashboard = () => {
       localStorage.setItem('currentUser', JSON.stringify(updatedUser));
       setUser(updatedUser);
       setAddMoneyAmount('');
-      alert(`✅ Added ₹${amount}. New balance: ₹${res.data.newBalance}`);
+      showSuccess(`₹${amount.toLocaleString('en-IN')} added.\nNew balance: ₹${res.data.newBalance.toLocaleString('en-IN')}`, 'Money Added');
     } catch (err) { setAddMoneyError(err.response?.data?.msg || 'Failed to add money'); }
     finally { setAddMoneyLoading(false); }
+  };
+
+  // ✅ Withdrawal handler
+  const handleWithdraw = async () => {
+    setWithdrawError('');
+
+    if (!withdrawAmount || Number(withdrawAmount) < 100) {
+      setWithdrawError('Minimum withdrawal is ₹100');
+      return;
+    }
+    const amt = Number(withdrawAmount);
+    const bal = Number(user?.walletBalance || 0);
+    if (amt > bal) {
+      setWithdrawError(`Insufficient balance. Available: ₹${bal}`);
+      return;
+    }
+    if (withdrawMethod === 'upi' && !withdrawUPI.trim()) {
+      setWithdrawError('Enter your UPI ID');
+      return;
+    }
+    if (withdrawMethod === 'bank') {
+      if (!withdrawBank.accountHolder || !withdrawBank.accountNumber || !withdrawBank.ifscCode) {
+        setWithdrawError('Fill all bank details');
+        return;
+      }
+    }
+
+    const confirmMsg =
+      `Confirm Withdrawal\n\n` +
+      `Amount: ₹${amt.toLocaleString('en-IN')}\n` +
+      `Method: ${withdrawMethod === 'upi' ? `UPI (${withdrawUPI})` : `Bank A/C (${withdrawBank.accountNumber})`}\n\n` +
+      `Money will be deducted from your wallet immediately.\n` +
+      `Credit will happen within 24-48 hours.`;
+
+    const ok = await showConfirm(confirmMsg, {
+      title: 'Confirm Withdrawal',
+      confirmText: 'Request Withdrawal'
+    });
+    if (!ok) return;
+
+    setWithdrawLoading(true);
+    try {
+      const res = await API.post('/wallet/withdraw', {
+        amount: amt,
+        method: withdrawMethod,
+        upiId: withdrawMethod === 'upi' ? withdrawUPI.trim() : undefined,
+        bankAccount: withdrawMethod === 'bank' ? withdrawBank : undefined
+      });
+
+      const updatedUser = { ...user, walletBalance: res.data.newBalance };
+      localStorage.setItem('currentUser', JSON.stringify(updatedUser));
+      setUser(updatedUser);
+      setWithdrawals([res.data.withdrawal, ...withdrawals]);
+
+      // Reset
+      setWithdrawAmount('');
+      setWithdrawUPI('');
+      setWithdrawBank({ accountHolder: '', accountNumber: '', ifscCode: '', bankName: '' });
+
+      showSuccess(res.data.msg, 'Withdrawal Requested');
+    } catch (err) {
+      const errData = err.response?.data;
+      setWithdrawError(errData?.msg || 'Withdrawal failed');
+    } finally {
+      setWithdrawLoading(false);
+    }
   };
 
   const handleProfileUpdate = async (e) => {
     e.preventDefault();
     const err = {};
-    if (!profileForm.name.trim()) err.name = 'Name is required';
-    if (!profileForm.email.trim()) err.email = 'Email is required';
+    if (!profileForm.name?.trim()) err.name = 'Name is required';
+    if (!profileForm.email?.trim()) err.email = 'Email is required';
     else if (!/\S+@\S+\.\S+/.test(profileForm.email)) err.email = 'Invalid email';
     if (profileForm.password && profileForm.password.length < 6) err.password = 'Password must be at least 6 characters';
     setProfileErrors(err);
     if (Object.keys(err).length > 0) return;
+
     setProfileLoading(true);
     try {
-      const payload = { name: profileForm.name, email: profileForm.email };
-      if (profileForm.password) payload.password = profileForm.password;
+      const payload = { ...profileForm };
+      if (!payload.password) delete payload.password;
+
       const res = await API.put('/auth/profile', payload);
-      const updatedUser = { ...user, name: res.data.name, email: res.data.email };
+      const updatedUser = {
+        ...user,
+        ...res.data,
+        walletBalance: user.walletBalance,
+        role: user.role
+      };
       localStorage.setItem('currentUser', JSON.stringify(updatedUser));
       setUser(updatedUser);
-      alert('✅ Profile updated!');
-    } catch (err) { alert('❌ Failed: ' + (err.response?.data?.msg || err.message)); }
-    finally { setProfileLoading(false); }
+      setProfileForm({ ...updatedUser, password: '' });
+      showSuccess('Profile updated successfully.', 'Saved');
+    } catch (err) {
+      showError(err.response?.data?.msg || err.message);
+    } finally {
+      setProfileLoading(false);
+    }
   };
 
   const handleLogout = () => { localStorage.clear(); navigate('/login'); };
@@ -585,19 +998,29 @@ const GeneratorDashboard = () => {
   const navItems = [
     { id: 'dashboard', icon: 'tachometer-alt', label: 'Dashboard' },
     { id: 'listings', icon: 'box-open', label: 'My Listings' },
+    { id: 'stock', icon: 'cubes', label: 'Total Stock' },        // ✅ NEW
     { id: 'findClients', icon: 'search', label: 'Find Clients' },
     { id: 'bids', icon: 'gavel', label: 'Bids Received', badge: pendingBidsCount },
     { id: 'messages', icon: 'comments', label: 'Messages' },
     { id: 'deals', icon: 'handshake', label: 'Deals' },
-    { id: 'addMoney', icon: 'wallet', label: 'Add Money' },
+    { id: 'withdraw', icon: 'money-bill-wave', label: 'Withdraw' },   // ✅ NEW
     { id: 'profile', icon: 'user', label: 'Profile' },
   ];
 
   const getStatusBadgeClass = (status) => {
     const map = {
-      active: 'status-active', pending: 'status-pending', closed: 'status-closed',
-      completed: 'status-closed', requested: 'status-pending', offered: 'status-pending',
-      accepted: 'status-active', rejected: 'status-closed', sold: 'status-closed'
+      // Listing statuses
+      active: 'status-active',
+      closed: 'status-closed',
+      sold: 'status-closed',       // legacy
+      // Deal statuses
+      offered: 'status-pending',    // amber
+      requested: 'status-pending',  // amber
+      accepted: 'status-active',    // green
+      completed: 'status-closed',   // grey (done)
+      rejected: 'status-closed',
+      // Legacy
+      pending: 'status-pending'
     };
     return map[status] || 'status-pending';
   };
@@ -605,9 +1028,17 @@ const GeneratorDashboard = () => {
   if (loading) {
     return (
       <div className="gp-loading-container">
-        <div className="gp-loading-card">
-          <div className="gp-spinner"></div>
-          <h2>Loading Dashboard...</h2>
+        <div className="gp-loading-logo-wrap">
+          <div className="gp-loading-logo-ring">
+            <div className="gp-loading-logo-inner">
+              <i className="fas fa-recycle"></i>
+            </div>
+          </div>
+          <h1 className="gp-loading-text">WasteExchange AI</h1>
+          <p className="gp-loading-tagline">Smart Waste Marketplace</p>
+          <div className="gp-loading-dots">
+            <span></span><span></span><span></span>
+          </div>
         </div>
       </div>
     );
@@ -621,7 +1052,7 @@ const GeneratorDashboard = () => {
             <div className="gp-kpi-grid">
               <KpiCard label="Total Listings" value={totalListings} color="#6366f1" icon="box-open" />
               <KpiCard label="Active Listings" value={activeListings} color="#22c55e" icon="check-circle" />
-              <KpiCard label="Pending Bids" value={pendingBidsCount} color="#fbbf24" icon="gavel" />
+              <KpiCard label="Active Bids" value={pendingBidsCount} color="#fbbf24" icon="gavel" />
               <KpiCard label="Completed Deals" value={completedDeals} color="#a78bfa" icon="handshake" />
             </div>
 
@@ -647,6 +1078,26 @@ const GeneratorDashboard = () => {
                 ))}
                 {listings.length === 0 && <p className="gp-no-data">No recent activity</p>}
               </div>
+            </div>
+
+            {/* ✅ Material Distribution Chart */}
+            <div className="gp-card" style={{ marginBottom: 24 }}>
+              <div className="gp-section-title">
+                <span><i className="fas fa-chart-pie me-2" style={{ color: '#a78bfa' }}></i>Material Distribution</span>
+                <span style={{ fontSize: '0.75rem', color: '#6b7280', fontWeight: 400 }}>
+                  By AI-predicted category
+                </span>
+              </div>
+              {listings.length === 0 ? (
+                <div className="gp-no-data-block" style={{ padding: '24px 0' }}>
+                  <i className="fas fa-chart-pie fa-2x" style={{ color: '#4b5563', marginBottom: 8 }}></i>
+                  <p style={{ fontSize: '0.85rem' }}>No listings yet</p>
+                </div>
+              ) : (
+                <div style={{ height: 260, position: 'relative' }}>
+                  <canvas ref={materialChartRef}></canvas>
+                </div>
+              )}
             </div>
 
             <div className="gp-actions-grid">
@@ -703,11 +1154,64 @@ const GeneratorDashboard = () => {
                       <td>₹{l.price}</td>
                       <td>{l.location}</td>
                       <td>
-                        {l.biddingEnabled
-                          ? <span className="gp-bid-chip"><i className="fas fa-gavel"></i> Live{l.biddingEndsAt ? ` · ${timeLeft(l.biddingEndsAt)}` : ''}</span>
-                          : <span style={{ color: '#9ca3af' }}>—</span>}
+                        {l.biddingEnabled ? (() => {
+                          const t = timeLeft(l.biddingEndsAt);
+                          const isEnded = t === 'Ended';
+                          const isAssigned = l.status === 'closed' || l.status === 'sold';
+                          if (isAssigned) {
+                            return <span className="gp-bid-chip" style={{ background: 'rgba(107,114,128,0.15)', color: '#9ca3af' }}>
+                              <i className="fas fa-lock"></i> Closed
+                            </span>;
+                          }
+                          return (
+                            <span
+                              className="gp-bid-chip"
+                              style={isEnded ? { background: 'rgba(248,113,113,0.15)', color: '#f87171' } : {}}
+                            >
+                              <i className={`fas fa-${isEnded ? 'stopwatch' : 'gavel'}`}></i>
+                              {isEnded ? 'Ended' : `Live${l.biddingEndsAt ? ` · ${t}` : ''}`}
+                            </span>
+                          );
+                        })() : <span style={{ color: '#9ca3af' }}>—</span>}
                       </td>
-                      <td><span className={`badge ${getStatusBadgeClass(l.status)}`}>{l.status}</span></td>
+
+                      <td>
+                        {(() => {
+                          // ✅ Compute proper status
+                          const isBiddingLive = l.biddingEnabled && l.biddingEndsAt && new Date(l.biddingEndsAt).getTime() > Date.now();
+                          const isAssigned = l.status === 'closed' || l.status === 'sold';
+
+                          // Find any accepted/completed deal on this listing
+                          const listingDeals = deals.filter(d => String(d.listingId) === String(l._id));
+                          const hasCompleted = listingDeals.some(d => d.status === 'completed');
+                          const hasAccepted = listingDeals.some(d => d.status === 'accepted');
+                          const hasOffered = listingDeals.some(d => d.status === 'offered' || d.status === 'requested');
+
+                          if (hasCompleted) {
+                            return <span className="badge status-closed" style={{ background: 'rgba(16,185,129,0.15)', color: '#10b981' }}>
+                              <i className="fas fa-check-circle me-1"></i>Completed
+                            </span>;
+                          }
+                          if (hasAccepted) {
+                            return <span className="badge status-active">Accepted</span>;
+                          }
+                          if (hasOffered) {
+                            return <span className="badge status-pending">Offered</span>;
+                          }
+                          if (isAssigned) {
+                            return <span className="badge status-closed">Closed</span>;
+                          }
+                          if (isBiddingLive) {
+                            return <span className="badge status-active">Active</span>;
+                          }
+                          if (l.biddingEnabled && !isBiddingLive) {
+                            return <span className="badge status-closed" style={{ background: 'rgba(107,114,128,0.15)', color: '#9ca3af' }}>
+                              Bidding Ended
+                            </span>;
+                          }
+                          return <span className="badge status-active">Active</span>;
+                        })()}
+                      </td>
                       <td>
                         <button className="btn-sm btn-outline-primary me-1" onClick={() => openEditModal(l)}><i className="fas fa-edit"></i></button>
                         <button className="btn-sm btn-outline-danger" onClick={() => deleteListing(l._id)}><i className="fas fa-trash"></i></button>
@@ -727,11 +1231,21 @@ const GeneratorDashboard = () => {
         );
 
       case 'findClients': {
-        const aiCount = aiMatches.length;
         const allCount = filteredRequirements.length;
+        const aiCount = aiRecommendedClients.length;
+
         return (
           <div>
-            <div className="gp-page-header"><h2>Find Clients</h2></div>
+            <div className="gp-page-header">
+              <h2>Find Clients</h2>
+              <button
+                className="gp-btn-primary"
+                onClick={() => { fetchAIRecClients(); }}
+                style={{ fontSize: '0.8rem', padding: '8px 16px' }}
+              >
+                <i className="fas fa-sync"></i> Refresh AI
+              </button>
+            </div>
 
             <div className="gp-pill-tabs">
               <button onClick={() => setClientsTab('ai')} className={`gp-pill-tab ${clientsTab === 'ai' ? 'active' : ''}`}>
@@ -748,20 +1262,223 @@ const GeneratorDashboard = () => {
 
             {clientsTab === 'ai' ? (
               <div className="gp-section-block">
-                <h3><i className="fas fa-robot me-2" style={{ color: '#8b5cf6' }}></i>AI Recommended Clients</h3>
-                {aiMatches.length === 0 ? (
+                <h3 style={{ fontSize: '1rem' }}>
+                  <i className="fas fa-robot me-2" style={{ color: '#8b5cf6' }}></i>
+                  AI Recommended Clients
+                </h3>
+                <p style={{ fontSize: '0.78rem', color: '#9ca3af', marginTop: -6, marginBottom: 14, lineHeight: 1.5 }}>
+                  <i className="fas fa-info-circle me-1"></i>
+                  Matches based on <strong style={{ color: '#a78bfa' }}>TF-IDF + Cosine Similarity</strong> — combining material, quantity, price and location fit.
+                </p>
+
+                {aiRecLoading ? (
+                  <div className="gp-no-data-block">
+                    <i className="fas fa-spinner fa-spin fa-2x" style={{ color: '#8b5cf6', marginBottom: 10 }}></i>
+                    <p style={{ fontSize: '0.85rem' }}>AI is analyzing your listings vs open requirements...</p>
+                  </div>
+                ) : aiRecommendedClients.length === 0 ? (
                   <div className="gp-no-data-block">
                     <i className="fas fa-robot fa-2x" style={{ color: '#4b5563', marginBottom: 10 }}></i>
-                    <p>No AI matches yet. Create a listing to get recommendations.</p>
+                    <p style={{ fontSize: '0.85rem' }}>No AI matches yet.</p>
+                    <small style={{ color: '#6b7280', fontSize: '0.75rem' }}>
+                      Make sure you have active listings and there are open buyer requirements.
+                    </small>
                   </div>
-                ) : aiMatches.map((item, idx) => (
-                  <div key={`${item._id}-${idx}`} className="gp-ai-item">
-                    <div>
-                      <strong>{item.material}</strong> <span className="gp-match-badge">Match {item.matchScore}%</span>
-                      <div className="gp-ai-details">📍 {item.location} | {item.minQty}-{item.maxQty}kg | Max ₹{item.maxPrice}/kg</div>
-                    </div>
+                ) : (
+                  <div className="gp-requests-grid">
+                    {[...aiRecommendedClients]
+                      .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0))
+                      .map((item, idx) => {
+                        const bc = idx === 0 ? '#22c55e' : idx === 1 ? '#fbbf24' : idx === 2 ? '#60a5fa' : '#8b5cf6';
+                        return (
+                          <div
+                            key={`${item._id}-${idx}`}
+                            style={{
+                              background: 'rgba(255,255,255,0.03)',
+                              border: '1px solid rgba(255,255,255,0.06)',
+                              borderLeft: `4px solid ${bc}`,
+                              borderRadius: 12,
+                              padding: '16px 18px',
+                              display: 'flex',
+                              justifyContent: 'space-between',
+                              alignItems: 'center',
+                              flexWrap: 'wrap',
+                              gap: 12,
+                              position: 'relative'
+                            }}
+                          >
+                            <div style={{ flex: 1, minWidth: 240 }}>
+                              {/* Row 1: Match badge + Material + Subtype + Buyer */}
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
+                                <span style={{
+                                  background: bc,
+                                  color: 'white',
+                                  padding: '3px 10px',
+                                  borderRadius: 20,
+                                  fontSize: '0.68rem',
+                                  fontWeight: 700,
+                                  letterSpacing: '0.2px'
+                                }}>
+                                  #{idx + 1} · {item.matchScore}% Match
+                                </span>
+                                <strong style={{ color: 'white', fontSize: '0.95rem', fontWeight: 700 }}>
+                                  {item.material}
+                                </strong>
+                                {item.materialSubtype && (
+                                  <span style={{
+                                    background: 'rgba(99,102,241,0.2)',
+                                    color: '#a78bfa',
+                                    padding: '2px 8px',
+                                    borderRadius: 8,
+                                    fontSize: '0.7rem',
+                                    fontWeight: 500
+                                  }}>
+                                    {item.materialSubtype}
+                                  </span>
+                                )}
+                                {item.buyerName && (
+                                  <span style={{
+                                    background: 'rgba(34,197,94,0.15)',
+                                    color: '#22c55e',
+                                    padding: '2px 10px',
+                                    borderRadius: 20,
+                                    fontSize: '0.7rem',
+                                    fontWeight: 600,
+                                    display: 'inline-flex',
+                                    alignItems: 'center',
+                                    gap: 4
+                                  }}>
+                                    <i className="fas fa-user" style={{ fontSize: '0.6rem' }}></i>
+                                    {item.buyerName}
+                                  </span>
+                                )}
+                              </div>
+
+                              {/* Row 2: Material details */}
+                              <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', fontSize: '0.82rem', color: '#9ca3af', marginBottom: 8 }}>
+                                <span>📉 {item.minQty}-{item.maxQty} kg</span>
+                                <span>💰 Max ₹{item.maxPrice}/kg</span>
+                                <span>📍 {item.location?.substring(0, 45)}{item.location?.length > 45 ? '...' : ''}</span>
+                              </div>
+
+                              {/* Row 3: Score breakdown */}
+                              <div style={{
+                                background: 'rgba(255,255,255,0.02)',
+                                padding: '8px 12px',
+                                borderRadius: 8,
+                                fontSize: '0.72rem',
+                                display: 'flex',
+                                gap: 16,
+                                flexWrap: 'wrap',
+                                alignItems: 'center'
+                              }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                                  <span style={{ color: '#6b7280' }}>Text Sim:</span>
+                                  <strong style={{ color: '#22c55e', fontSize: '0.75rem' }}>{item.textSimilarity}%</strong>
+                                </div>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                                  <span style={{ color: '#6b7280' }}>Rule-based:</span>
+                                  <strong style={{ color: '#60a5fa', fontSize: '0.75rem' }}>{item.ruleScore}%</strong>
+                                </div>
+                                {item.aiExplanation && item.aiExplanation[0] && (
+                                  <div style={{ color: '#a78bfa', fontStyle: 'italic', display: 'flex', alignItems: 'center', gap: 4 }}>
+                                    <i className="fas fa-lightbulb"></i>
+                                    <span style={{ fontSize: '0.72rem' }}>{item.aiExplanation[0]}</span>
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+
+                            {(() => {
+                              const cid = String(user?._id || user?.id || '');
+                              const itemRelatedDeals = deals.filter(d => String(d.requirementId) === String(item._id));
+                              const myDeal = itemRelatedDeals.find(d => String(d.generatorId) === cid);
+                              const itemAlreadyOffered = myDeal && (myDeal.status === 'offered' || myDeal.status === 'requested');
+                              const itemAccepted = myDeal && myDeal.status === 'accepted';
+                              const itemFulfilled = (myDeal && myDeal.status === 'completed') || item.status === 'fulfilled';
+
+                              return (
+                                <div style={{ display: 'flex', gap: 8, flexShrink: 0, alignItems: 'center' }}>
+                                  <button
+                                    onClick={() => setReviewRequirement(item)}
+                                    style={{
+                                      padding: '8px 14px',
+                                      borderRadius: 8,
+                                      border: '1px solid rgba(139,92,246,0.3)',
+                                      background: 'rgba(139,92,246,0.1)',
+                                      color: '#a78bfa',
+                                      cursor: 'pointer',
+                                      fontSize: '0.78rem',
+                                      fontWeight: 600,
+                                      display: 'inline-flex',
+                                      alignItems: 'center',
+                                      gap: 6
+                                    }}
+                                  >
+                                    <i className="fas fa-eye"></i> Review
+                                  </button>
+
+                                  {itemFulfilled ? (
+                                    <span style={{
+                                      padding: '8px 14px', borderRadius: 8,
+                                      background: 'rgba(16,185,129,0.15)', color: '#10b981',
+                                      fontSize: '0.72rem', fontWeight: 700,
+                                      display: 'inline-flex', alignItems: 'center', gap: 6,
+                                      textTransform: 'uppercase',
+                                      border: '1px solid rgba(16,185,129,0.3)',
+                                      letterSpacing: '0.3px'
+                                    }}>
+                                      <i className="fas fa-check-circle"></i> Fulfilled
+                                    </span>
+                                  ) : itemAccepted ? (
+                                    <span style={{
+                                      padding: '8px 14px', borderRadius: 8,
+                                      background: 'rgba(96,165,250,0.15)', color: '#60a5fa',
+                                      fontSize: '0.72rem', fontWeight: 700,
+                                      display: 'inline-flex', alignItems: 'center', gap: 6,
+                                      textTransform: 'uppercase',
+                                      letterSpacing: '0.3px'
+                                    }}>
+                                      <i className="fas fa-hourglass-half"></i> In Progress
+                                    </span>
+                                  ) : itemAlreadyOffered ? (
+                                    <span style={{
+                                      padding: '8px 14px', borderRadius: 8,
+                                      background: 'rgba(34,197,94,0.15)', color: '#22c55e',
+                                      fontSize: '0.72rem', fontWeight: 700,
+                                      display: 'inline-flex', alignItems: 'center', gap: 6,
+                                      textTransform: 'uppercase', letterSpacing: '0.3px'
+                                    }}>
+                                      <i className="fas fa-paper-plane"></i> Offer Sent
+                                    </span>
+                                  ) : (
+                                    <button
+                                      onClick={() => handleContactBuyer(item)}
+                                      style={{
+                                        padding: '8px 16px',
+                                        borderRadius: 8,
+                                        border: 'none',
+                                        background: 'linear-gradient(135deg, #22c55e, #16a34a)',
+                                        color: 'white',
+                                        cursor: 'pointer',
+                                        fontSize: '0.78rem',
+                                        fontWeight: 600,
+                                        display: 'inline-flex',
+                                        alignItems: 'center',
+                                        gap: 6
+                                      }}
+                                    >
+                                      <i className="fas fa-handshake"></i> Send Offer
+                                    </button>
+                                  )}
+                                </div>
+                              );
+                            })()}
+                          </div>
+                        );
+                      })}
                   </div>
-                ))}
+                )}
               </div>
             ) : (
               <div>
@@ -775,19 +1492,52 @@ const GeneratorDashboard = () => {
                   <input type="number" placeholder="Max Qty" value={filterMaxQty} onChange={(e) => setFilterMaxQty(e.target.value)} />
                 </div>
 
-                <h3 style={{ marginTop: 8 }}>All Buyer Requirements</h3>
+                <h3 style={{ marginTop: 8, marginBottom: 14, fontSize: '1rem' }}>
+                  All Buyer Requirements
+                  <span style={{ fontSize: '0.75rem', color: '#6b7280', fontWeight: 400, marginLeft: 8 }}>
+                    ({filteredRequirements.filter(r => r.status === 'open').length} open · {filteredRequirements.length} total)
+                  </span>
+                </h3>
                 <div className="gp-requests-grid">
-                  {paginatedRequirements.map(r => (
-                    <RequirementCard
-                      key={r._id}
-                      requirement={r}
-                      viewMode="browse"
-                      onContact={handleContactBuyer}
-                      onReview={(req) => setReviewRequirement(req)}
-                      onDelete={null}
-                      onEdit={null}
-                    />
-                  ))}
+                  {paginatedRequirements.length === 0 ? (
+                    <div className="gp-no-data-block">
+                      <i className="fas fa-inbox fa-2x" style={{ color: '#4b5563', marginBottom: 10 }}></i>
+                      <p style={{ fontSize: '0.85rem' }}>No open requirements found.</p>
+                    </div>
+                  ) : paginatedRequirements.map(r => {
+                    const cid = String(user?._id || user?.id || '');
+                    const relatedDeals = deals.filter(d => String(d.requirementId) === String(r._id));
+
+                    const anyCompletedDeal = relatedDeals.some(d => d.status === 'completed');
+                    const requirementFulfilled = r.status === 'fulfilled' || anyCompletedDeal;
+
+                    const myActiveDeal = relatedDeals.find(d =>
+                      String(d.generatorId) === cid &&
+                      (d.status === 'accepted' || d.status === 'completed')
+                    );
+                    const isFulfilled = requirementFulfilled || myActiveDeal?.status === 'completed';
+                    const isInProgress = !isFulfilled && myActiveDeal?.status === 'accepted';
+
+                    const alreadyOffered = relatedDeals.some(d =>
+                      String(d.generatorId) === cid &&
+                      (d.status === 'offered' || d.status === 'requested')
+                    );
+
+                    return (
+                      <RequirementCard
+                        key={r._id}
+                        requirement={r}
+                        viewMode="browse"
+                        onContact={handleContactBuyer}
+                        onReview={(req) => setReviewRequirement(req)}
+                        onDelete={null}
+                        onEdit={null}
+                        isFulfilled={isFulfilled}
+                        isInProgress={isInProgress}
+                        alreadyOffered={alreadyOffered}
+                      />
+                    );
+                  })}
                 </div>
                 {filteredRequirements.length > itemsPerPage && (
                   <div className="gp-pagination">
@@ -798,6 +1548,491 @@ const GeneratorDashboard = () => {
                 )}
               </div>
             )}
+
+            {/* ✅ NEW: My Past Deals & Offers History — Ye Section Hai Jo Tu Chahta Tha */}
+            <div style={{ marginTop: 32 }}>
+              <h3 style={{ marginTop: 0, marginBottom: 14, fontSize: '1rem', color: '#a78bfa' }}>
+                <i className="fas fa-history me-2"></i>
+                My Buyer Interactions ({deals.filter(d => String(d.generatorId) === currentUserId).length})
+              </h3>
+
+              {deals.filter(d => String(d.generatorId) === currentUserId).length === 0 ? (
+                <div className="gp-no-data-block" style={{ padding: '24px 0' }}>
+                  <i className="fas fa-inbox fa-2x" style={{ color: '#4b5563', marginBottom: 8 }}></i>
+                  <p style={{ fontSize: '0.85rem' }}>No buyer interactions yet</p>
+                </div>
+              ) : (
+                <div className="gp-table">
+                  <table className="table">
+                    <thead>
+                      <tr>
+                        <th>Buyer</th>
+                        <th>Material</th>
+                        <th>Qty</th>
+                        <th>Price/kg</th>
+                        <th>Total</th>
+                        <th>Type</th>
+                        <th>Status</th>
+                        <th>Date</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {deals
+                        .filter(d => String(d.generatorId) === currentUserId)
+                        .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+                        .map(d => (
+                          <tr key={d._id}>
+                            <td>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                <div style={{
+                                  width: 28, height: 28, borderRadius: '50%',
+                                  background: 'linear-gradient(135deg, #22c55e, #16a34a)',
+                                  color: 'white', display: 'flex', alignItems: 'center',
+                                  justifyContent: 'center', fontSize: '0.72rem', fontWeight: 700
+                                }}>
+                                  {(d.buyerName || 'U').charAt(0).toUpperCase()}
+                                </div>
+                                <strong style={{ fontSize: '0.88rem' }}>{d.buyerName || 'Unknown'}</strong>
+                              </div>
+                            </td>
+                            <td style={{ fontSize: '0.88rem' }}>{d.material}</td>
+                            <td style={{ fontSize: '0.88rem' }}>{d.quantity} kg</td>
+                            <td style={{ fontSize: '0.88rem' }}>₹{d.pricePerUnit}/kg</td>
+                            <td style={{ color: '#22c55e', fontWeight: 600, fontSize: '0.88rem' }}>
+                              ₹{Number(d.totalAmount).toLocaleString('en-IN')}
+                            </td>
+                            <td>
+                              <span style={{
+                                background: d.initiatedBy === 'generator'
+                                  ? 'rgba(99,102,241,0.15)'
+                                  : 'rgba(251,191,36,0.15)',
+                                color: d.initiatedBy === 'generator' ? '#a78bfa' : '#fbbf24',
+                                padding: '3px 10px', borderRadius: 8,
+                                fontSize: '0.7rem', fontWeight: 600,
+                                display: 'inline-block',
+                                whiteSpace: 'nowrap'
+                              }}>
+                                {d.initiatedBy === 'generator' ? 'Offer Sent' : 'Request Received'}
+                              </span>
+                            </td>
+                            <td>
+                              <span className={`badge ${getStatusBadgeClass(d.status)}`} style={{ fontSize: '0.72rem' }}>
+                                {d.status === 'completed' ? '✅ Completed' :
+                                  d.status === 'accepted' ? 'Paid' :
+                                    d.status === 'rejected' ? 'Rejected' :
+                                      'Offered'}
+                              </span>
+                            </td>
+                            <td>
+                              <small style={{ color: '#9ca3af', fontSize: '0.75rem' }}>{formatDate(d.createdAt)}</small>
+                            </td>
+                          </tr>
+                        ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      }
+
+      case 'stock': {
+        // ✅ Calculate aggregated stock
+        const stockStats = listings.reduce((acc, l) => {
+          const qty = Number(l.quantity) || 0;
+          acc.totalQty += qty;
+          acc.count++;
+
+          if (l.status === 'active') {
+            acc.activeQty += qty;
+            acc.activeCount++;
+          } else if (l.status === 'pending') {
+            acc.pendingQty += qty;
+            acc.pendingCount++;
+          } else if (l.status === 'sold' || l.status === 'closed') {
+            acc.soldQty += qty;
+            acc.soldCount++;
+          }
+
+          // Total value (qty × price)
+          acc.totalValue += qty * (Number(l.price) || 0);
+
+          return acc;
+        }, { totalQty: 0, activeQty: 0, pendingQty: 0, soldQty: 0, count: 0, activeCount: 0, pendingCount: 0, soldCount: 0, totalValue: 0 });
+
+        // ✅ Offers sent breakdown
+        const offersSent = deals.filter(d => String(d.generatorId) === currentUserId && d.initiatedBy === 'generator');
+
+        // ✅ Per-listing stock table
+        const listingStock = listings.map(l => {
+          const relatedDeals = deals.filter(d => String(d.listingId) === String(l._id));
+          const soldDeals = relatedDeals.filter(d => d.status === 'completed' || d.status === 'accepted');
+          const pendingDeals = relatedDeals.filter(d => d.status === 'requested' || d.status === 'offered');
+
+          return {
+            ...l,
+            soldQty: soldDeals.reduce((s, d) => s + (Number(d.quantity) || 0), 0),
+            pendingQty: pendingDeals.reduce((s, d) => s + (Number(d.quantity) || 0), 0),
+            totalDeals: relatedDeals.length,
+            potentialValue: (Number(l.quantity) || 0) * (Number(l.price) || 0)
+          };
+        });
+
+        const stockColor = (status) => {
+          if (status === 'active') return '#22c55e';
+          if (status === 'pending') return '#fbbf24';
+          if (status === 'sold' || status === 'closed') return '#9ca3af';
+          return '#6366f1';
+        };
+
+        return (
+          <div>
+            <div className="gp-page-header">
+              <h2>📦 Total Stock Overview</h2>
+            </div>
+
+            {/* Top KPI Cards */}
+            <div className="gp-kpi-grid">
+              <KpiCard
+                label="Total Stock"
+                value={`${stockStats.totalQty.toLocaleString('en-IN')} kg`}
+                color="#6366f1"
+                icon="cubes"
+              />
+              <KpiCard
+                label="Active (Unsold)"
+                value={`${stockStats.activeQty.toLocaleString('en-IN')} kg`}
+                color="#22c55e"
+                icon="check-circle"
+              />
+              <KpiCard
+                label="Pending"
+                value={`${stockStats.pendingQty.toLocaleString('en-IN')} kg`}
+                color="#fbbf24"
+                icon="hourglass-half"
+              />
+              <KpiCard
+                label="Sold / Closed"
+                value={`${stockStats.soldQty.toLocaleString('en-IN')} kg`}
+                color="#a78bfa"
+                icon="handshake"
+              />
+            </div>
+
+            {/* Secondary Stats Row */}
+            <div className="gp-stats-row" style={{ marginBottom: 24 }}>
+              <div className="gp-card">
+                <div className="gp-section-title">
+                  <span>Stock Summary</span>
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 16 }}>
+                  <div style={{
+                    background: 'rgba(99,102,241,0.08)',
+                    border: '1px solid rgba(99,102,241,0.2)',
+                    borderRadius: 10,
+                    padding: '14px 16px'
+                  }}>
+                    <div style={{ fontSize: '0.75rem', color: '#a78bfa', marginBottom: 4 }}>
+                      <i className="fas fa-boxes me-1"></i> Total Listings
+                    </div>
+                    <div style={{ fontSize: '1.5rem', fontWeight: 700, color: '#a78bfa' }}>
+                      {stockStats.count}
+                    </div>
+                  </div>
+
+                  <div style={{
+                    background: 'rgba(34,197,94,0.08)',
+                    border: '1px solid rgba(34,197,94,0.2)',
+                    borderRadius: 10,
+                    padding: '14px 16px'
+                  }}>
+                    <div style={{ fontSize: '0.75rem', color: '#22c55e', marginBottom: 4 }}>
+                      <i className="fas fa-rupee-sign me-1"></i> Total Stock Value
+                    </div>
+                    <div style={{ fontSize: '1.5rem', fontWeight: 700, color: '#22c55e' }}>
+                      ₹{stockStats.totalValue.toLocaleString('en-IN')}
+                    </div>
+                  </div>
+
+                  <div style={{
+                    background: 'rgba(251,191,36,0.08)',
+                    border: '1px solid rgba(251,191,36,0.2)',
+                    borderRadius: 10,
+                    padding: '14px 16px'
+                  }}>
+                    <div style={{ fontSize: '0.75rem', color: '#fbbf24', marginBottom: 4 }}>
+                      <i className="fas fa-paper-plane me-1"></i> Offers Sent
+                    </div>
+                    <div style={{ fontSize: '1.5rem', fontWeight: 700, color: '#fbbf24' }}>
+                      {offersSent.length}
+                    </div>
+                  </div>
+
+                  <div style={{
+                    background: 'rgba(139,92,246,0.08)',
+                    border: '1px solid rgba(139,92,246,0.2)',
+                    borderRadius: 10,
+                    padding: '14px 16px'
+                  }}>
+                    <div style={{ fontSize: '0.75rem', color: '#c4b5fd', marginBottom: 4 }}>
+                      <i className="fas fa-handshake me-1"></i> Total Deals
+                    </div>
+                    <div style={{ fontSize: '1.5rem', fontWeight: 700, color: '#c4b5fd' }}>
+                      {deals.filter(d => String(d.generatorId) === currentUserId).length}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Stock Distribution Chart-like visual */}
+              <div className="gp-card">
+                <div className="gp-section-title">
+                  <span>Stock Distribution</span>
+                </div>
+                {stockStats.totalQty > 0 ? (
+                  <>
+                    {/* Active Bar */}
+                    <div style={{ marginBottom: 14 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', marginBottom: 6 }}>
+                        <span style={{ color: '#22c55e' }}>
+                          <i className="fas fa-circle me-1" style={{ fontSize: '0.5rem' }}></i> Active
+                        </span>
+                        <strong style={{ color: '#22c55e' }}>
+                          {stockStats.activeQty.toLocaleString('en-IN')} kg
+                        </strong>
+                      </div>
+                      <div style={{ height: 10, background: 'rgba(255,255,255,0.05)', borderRadius: 5, overflow: 'hidden' }}>
+                        <div style={{
+                          height: '100%',
+                          width: `${(stockStats.activeQty / stockStats.totalQty) * 100}%`,
+                          background: 'linear-gradient(90deg, #22c55e, #16a34a)',
+                          borderRadius: 5,
+                          transition: 'width 0.5s'
+                        }}></div>
+                      </div>
+                    </div>
+
+                    {/* Pending Bar */}
+                    <div style={{ marginBottom: 14 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', marginBottom: 6 }}>
+                        <span style={{ color: '#fbbf24' }}>
+                          <i className="fas fa-circle me-1" style={{ fontSize: '0.5rem' }}></i> Pending
+                        </span>
+                        <strong style={{ color: '#fbbf24' }}>
+                          {stockStats.pendingQty.toLocaleString('en-IN')} kg
+                        </strong>
+                      </div>
+                      <div style={{ height: 10, background: 'rgba(255,255,255,0.05)', borderRadius: 5, overflow: 'hidden' }}>
+                        <div style={{
+                          height: '100%',
+                          width: `${(stockStats.pendingQty / stockStats.totalQty) * 100}%`,
+                          background: 'linear-gradient(90deg, #fbbf24, #d97706)',
+                          borderRadius: 5,
+                          transition: 'width 0.5s'
+                        }}></div>
+                      </div>
+                    </div>
+
+                    {/* Sold Bar */}
+                    <div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', marginBottom: 6 }}>
+                        <span style={{ color: '#a78bfa' }}>
+                          <i className="fas fa-circle me-1" style={{ fontSize: '0.5rem' }}></i> Sold
+                        </span>
+                        <strong style={{ color: '#a78bfa' }}>
+                          {stockStats.soldQty.toLocaleString('en-IN')} kg
+                        </strong>
+                      </div>
+                      <div style={{ height: 10, background: 'rgba(255,255,255,0.05)', borderRadius: 5, overflow: 'hidden' }}>
+                        <div style={{
+                          height: '100%',
+                          width: `${(stockStats.soldQty / stockStats.totalQty) * 100}%`,
+                          background: 'linear-gradient(90deg, #a78bfa, #8b5cf6)',
+                          borderRadius: 5,
+                          transition: 'width 0.5s'
+                        }}></div>
+                      </div>
+                    </div>
+                  </>
+                ) : (
+                  <div className="gp-no-data-block" style={{ padding: '24px 0' }}>
+                    <i className="fas fa-chart-pie fa-2x" style={{ color: '#4b5563', marginBottom: 8 }}></i>
+                    <p style={{ fontSize: '0.85rem' }}>No stock data yet</p>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Per-Listing Stock Breakdown */}
+            <div className="gp-card" style={{ marginBottom: 24 }}>
+              <div className="gp-section-title">
+                <span><i className="fas fa-list-ul me-2" style={{ color: '#a78bfa' }}></i>Per-Listing Stock Breakdown</span>
+              </div>
+              {listingStock.length === 0 ? (
+                <div className="gp-no-data-block">
+                  <i className="fas fa-box-open fa-2x" style={{ color: '#4b5563', marginBottom: 8 }}></i>
+                  <p>No listings yet. Create a listing to start tracking stock.</p>
+                  <button className="gp-btn-primary" style={{ marginTop: 8 }} onClick={() => setActivePage('create')}>
+                    <i className="fas fa-plus"></i> Create Listing
+                  </button>
+                </div>
+              ) : (
+                <div className="gp-table" style={{ marginTop: 8 }}>
+                  <table className="table">
+                    <thead>
+                      <tr>
+                        <th>Material</th>
+                        <th>Total Qty</th>
+                        <th>Sold</th>
+                        <th>Pending</th>
+                        <th>Available</th>
+                        <th>Price</th>
+                        <th>Total Value</th>
+                        <th>Status</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {listingStock.map(l => {
+                        const available = Math.max(0, (Number(l.quantity) || 0) - l.soldQty - l.pendingQty);
+                        return (
+                          <tr key={l._id}>
+                            <td>
+                              <strong>{l.material}</strong>
+                              {l.materialSubtype && <><br /><small style={{ color: '#9ca3af' }}>{l.materialSubtype}</small></>}
+                            </td>
+                            <td><strong>{l.quantity} kg</strong></td>
+                            <td>
+                              {l.soldQty > 0 ? (
+                                <span style={{
+                                  background: 'rgba(167,139,250,0.15)',
+                                  color: '#a78bfa',
+                                  padding: '2px 8px',
+                                  borderRadius: 8,
+                                  fontSize: '0.75rem',
+                                  fontWeight: 600
+                                }}>
+                                  {l.soldQty} kg
+                                </span>
+                              ) : (
+                                <span style={{ color: '#6b7280' }}>—</span>
+                              )}
+                            </td>
+                            <td>
+                              {l.pendingQty > 0 ? (
+                                <span style={{
+                                  background: 'rgba(251,191,36,0.15)',
+                                  color: '#fbbf24',
+                                  padding: '2px 8px',
+                                  borderRadius: 8,
+                                  fontSize: '0.75rem',
+                                  fontWeight: 600
+                                }}>
+                                  {l.pendingQty} kg
+                                </span>
+                              ) : (
+                                <span style={{ color: '#6b7280' }}>—</span>
+                              )}
+                            </td>
+                            <td>
+                              <span style={{
+                                background: 'rgba(34,197,94,0.15)',
+                                color: '#22c55e',
+                                padding: '2px 8px',
+                                borderRadius: 8,
+                                fontSize: '0.75rem',
+                                fontWeight: 600
+                              }}>
+                                {available} kg
+                              </span>
+                            </td>
+                            <td>₹{l.price}/kg</td>
+                            <td style={{ color: '#22c55e', fontWeight: 600 }}>
+                              ₹{l.potentialValue.toLocaleString('en-IN')}
+                            </td>
+                            <td>
+                              <span className={`badge ${getStatusBadgeClass(l.status)}`}>{l.status}</span>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+
+            {/* Offers Sent Table */}
+            <div className="gp-card">
+              <div className="gp-section-title">
+                <span>
+                  <i className="fas fa-paper-plane me-2" style={{ color: '#22c55e' }}></i>
+                  Offers Sent to Buyers ({offersSent.length})
+                </span>
+              </div>
+              {offersSent.length === 0 ? (
+                <div className="gp-no-data-block">
+                  <i className="fas fa-inbox fa-2x" style={{ color: '#4b5563', marginBottom: 8 }}></i>
+                  <p>No offers sent yet. Go to Find Clients to send offers.</p>
+                  <button className="gp-btn-primary" style={{ marginTop: 8 }} onClick={() => setActivePage('findClients')}>
+                    <i className="fas fa-search"></i> Find Clients
+                  </button>
+                </div>
+              ) : (
+                <div className="gp-table" style={{ marginTop: 8 }}>
+                  <table className="table">
+                    <thead>
+                      <tr>
+                        <th>Buyer</th>
+                        <th>Material</th>
+                        <th>Quantity</th>
+                        <th>Price/kg</th>
+                        <th>Total</th>
+                        <th>Status</th>
+                        <th>Date</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {offersSent.map(d => (
+                        <tr key={d._id}>
+                          <td>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                              <div style={{
+                                width: 28,
+                                height: 28,
+                                borderRadius: '50%',
+                                background: 'linear-gradient(135deg, #6366f1, #8b5cf6)',
+                                color: 'white',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                fontSize: '0.75rem',
+                                fontWeight: 700
+                              }}>
+                                {(d.buyerName || 'U').charAt(0).toUpperCase()}
+                              </div>
+                              <strong>{d.buyerName || 'Unknown Buyer'}</strong>
+                            </div>
+                          </td>
+                          <td>{d.material}</td>
+                          <td>{d.quantity} kg</td>
+                          <td>₹{d.pricePerUnit}/kg</td>
+                          <td style={{ color: '#22c55e', fontWeight: 600 }}>
+                            ₹{Number(d.totalAmount).toLocaleString('en-IN')}
+                          </td>
+                          <td>
+                            <span className={`badge ${getStatusBadgeClass(d.status)}`}>{d.status}</span>
+                          </td>
+                          <td>
+                            <small style={{ color: '#9ca3af' }}>{formatDate(d.createdAt)}</small>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
           </div>
         );
       }
@@ -806,95 +2041,239 @@ const GeneratorDashboard = () => {
         const activeBidListings = bidListings.filter(l => l.status !== 'sold' && l.status !== 'closed');
         const closedBidListings = bidListings.filter(l => l.status === 'sold' || l.status === 'closed');
         const shown = bidsTab === 'active' ? activeBidListings : closedBidListings;
+
         return (
           <div>
-            <div className="gp-page-header"><h2>Bids Received</h2></div>
+            <div className="gp-page-header">
+              <h2>Bids & Requests Received</h2>
+              <button className="gp-btn-primary" onClick={loadBids} style={{ fontSize: '0.8rem', padding: '8px 16px' }}>
+                <i className="fas fa-sync"></i> Refresh
+              </button>
+            </div>
 
             <div className="gp-pill-tabs">
-              {[
-                { key: 'active', label: 'Active Bidding', count: activeBidListings.length, dot: '#fbbf24' },
-                { key: 'closed', label: 'Closed / Sold', count: closedBidListings.length, dot: '#22c55e' },
-              ].map(tab => {
-                const isActive = bidsTab === tab.key;
-                return (
-                  <button key={tab.key} onClick={() => setBidsTab(tab.key)} className={`gp-pill-tab ${isActive ? 'active' : ''}`}>
-                    <span className="gp-pill-dot" style={{ background: tab.dot }} />
-                    {tab.label}
-                    <span className="gp-pill-count">{tab.count}</span>
-                  </button>
-                );
-              })}
+              <button onClick={() => setBidsTab('active')} className={`gp-pill-tab ${bidsTab === 'active' ? 'active' : ''}`}>
+                <span className="gp-pill-dot" style={{ background: '#fbbf24' }} />
+                Active Bidding
+                <span className="gp-pill-count">{activeBidListings.length}</span>
+              </button>
+              <button onClick={() => setBidsTab('closed')} className={`gp-pill-tab ${bidsTab === 'closed' ? 'active' : ''}`}>
+                <span className="gp-pill-dot" style={{ background: '#22c55e' }} />
+                Closed / Sold
+                <span className="gp-pill-count">{closedBidListings.length}</span>
+              </button>
             </div>
 
             {shown.length === 0 ? (
               <div className="gp-no-data-block">
                 <i className="fas fa-gavel fa-3x" style={{ color: '#4b5563', marginBottom: 12 }}></i>
-                <p>{bidsTab === 'active' ? 'No listings currently receiving bids.' : 'No closed auctions yet.'}</p>
+                <p>{bidsTab === 'active' ? 'No active bidding listings.' : 'No closed/sold listings yet.'}</p>
+                <small style={{ color: '#6b7280' }}>Enable bidding when you create a listing.</small>
               </div>
             ) : (
               <div className="gp-bid-listings">
                 {shown.map(listing => {
                   const sortedBids = [...(listing.bids || [])].sort((a, b) => b.amount - a.amount);
                   const topBid = sortedBids[0];
+                  const allRequests = listing.requests || [];
+                  const pendingRequests = allRequests.filter(r => r.status === 'requested' || r.status === 'offered');
+                  const acceptedRequests = allRequests.filter(r => r.status === 'accepted');
+                  const isEnded = listing.biddingEndsAt && new Date(listing.biddingEndsAt).getTime() <= Date.now();
+                  const isClosed = listing.status === 'sold' || listing.status === 'closed';
+
                   return (
                     <div key={listing._id} className="gp-bid-listing-card">
                       <div className="gp-bid-listing-header">
                         <div>
-                          <h3>{listing.material} <small style={{ color: '#9ca3af', fontWeight: 400 }}>({listing.quantity} kg)</small></h3>
+                          <h3>
+                            {listing.material}
+                            {listing.materialSubtype && <span style={{ color: '#a78bfa', fontWeight: 500 }}> · {listing.materialSubtype}</span>}
+                            <small style={{ color: '#9ca3af', fontWeight: 400 }}> ({listing.quantity} kg)</small>
+                          </h3>
                           <p className="gp-bid-listing-meta">
-                            📍 {listing.location} &middot; Base price ₹{listing.price}/kg
+                            📍 {listing.location} &middot; Base ₹{listing.price}/kg
                             {listing.minBidPrice ? <> &middot; Min bid ₹{listing.minBidPrice}/kg</> : null}
                           </p>
                         </div>
                         <div className="gp-bid-listing-status">
-                          {listing.status === 'sold' || listing.status === 'closed'
-                            ? <span className="badge status-closed">Closed</span>
-                            : <span className="gp-bid-chip"><i className="fas fa-clock"></i> {timeLeft(listing.biddingEndsAt) || 'Live'}</span>}
+                          {isClosed ? (
+                            <span className="gp-bid-chip" style={{ background: 'rgba(16,185,129,0.15)', color: '#10b981', border: '1px solid rgba(16,185,129,0.3)' }}>
+                              <i className="fas fa-lock"></i> Assigned & Closed
+                            </span>
+                          ) : isEnded ? (
+                            <span className="gp-bid-chip" style={{ background: 'rgba(248,113,113,0.15)', color: '#f87171', border: '1px solid rgba(248,113,113,0.3)' }}>
+                              <i className="fas fa-stopwatch"></i> Bidding Ended — Award Pending
+                            </span>
+                          ) : (
+                            <span className="gp-bid-chip">
+                              <i className="fas fa-clock"></i> Live {listing.biddingEndsAt ? `· ${timeLeft(listing.biddingEndsAt)}` : ''}
+                            </span>
+                          )}
                         </div>
                       </div>
 
-                      {sortedBids.length === 0 ? (
-                        <p className="gp-no-data" style={{ padding: '12px 0' }}>No bids placed yet.</p>
-                      ) : (
-                        <div className="gp-bid-table">
-                          <table className="table">
-                            <thead><tr><th>Buyer</th><th>Bid Amount</th><th>Placed On</th><th>Status</th><th>Action</th></tr></thead>
-                            <tbody>
-                              {sortedBids.map((bid, idx) => (
-                                <tr key={bid.id} className={idx === 0 && bid.status !== 'rejected' ? 'gp-top-bid-row' : ''}>
-                                  <td>
-                                    {bid.buyerName}
-                                    {idx === 0 && bid.status !== 'rejected' && <span className="gp-top-bid-badge">🏆 Highest</span>}
-                                  </td>
-                                  <td><strong>₹{bid.amount}/kg</strong></td>
-                                  <td><small>{formatDate(bid.createdAt)}</small></td>
-                                  <td>
-                                    {bid.status === 'accepted' ? <span className="badge status-active">Won</span> :
-                                      bid.status === 'rejected' ? <span className="badge status-closed">Rejected</span> :
-                                        <span className="badge status-pending">Pending</span>}
-                                  </td>
-                                  <td>
-                                    {bid.status !== 'accepted' && bid.status !== 'rejected' && listing.status !== 'sold' && listing.status !== 'closed' && (
-                                      <>
-                                        <button className="btn-sm btn-outline-success me-1" onClick={() => handleAcceptBid(listing._id, bid.id)}><i className="fas fa-check"></i> Accept</button>
-                                        <button className="btn-sm btn-outline-danger" onClick={() => handleRejectBid(listing._id, bid.id)}><i className="fas fa-times"></i></button>
-                                      </>
-                                    )}
-                                  </td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
+                      {/* ====== BIDS SECTION ====== */}
+                      {sortedBids.length > 0 && (
+                        <>
+                          <div style={{ fontSize: '0.75rem', color: '#fbbf24', fontWeight: 700, marginBottom: 6, marginTop: 12, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                            <i className="fas fa-gavel me-2"></i>Bids Received ({sortedBids.length})
+                          </div>
+                          <div className="gp-bid-table">
+                            <table className="table">
+                              <thead>
+                                <tr><th>Buyer</th><th>Bid Amount</th><th>Placed On</th><th>Status</th><th>Action</th></tr>
+                              </thead>
+                              <tbody>
+                                {sortedBids.map((bid, idx) => (
+                                  <tr key={bid.id} className={idx === 0 && bid.status !== 'rejected' ? 'gp-top-bid-row' : ''}>
+                                    <td>
+                                      {bid.buyerName}
+                                      {idx === 0 && bid.status !== 'rejected' && <span className="gp-top-bid-badge">🏆 Highest</span>}
+                                    </td>
+                                    <td><strong>₹{bid.amount}/kg</strong></td>
+                                    <td><small>{formatDate(bid.createdAt)}</small></td>
+                                    <td>
+                                      {bid.status === 'accepted' ? <span className="badge status-active">Won</span> :
+                                        bid.status === 'rejected' ? <span className="badge status-closed">Rejected</span> :
+                                          <span className="badge status-pending">Pending</span>}
+                                    </td>
+                                    <td>
+                                      {bid.status !== 'accepted' && bid.status !== 'rejected' && !isClosed && (
+                                        <>
+                                          <button className="btn-sm btn-outline-success me-1" onClick={() => handleAcceptBid(listing._id, bid.id)}>
+                                            <i className="fas fa-check"></i> Accept
+                                          </button>
+                                          <button className="btn-sm btn-outline-danger" onClick={() => handleRejectBid(listing._id, bid.id)}>
+                                            <i className="fas fa-times"></i>
+                                          </button>
+                                        </>
+                                      )}
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        </>
+                      )}
+
+                      {/* ====== DIRECT REQUESTS SECTION ====== */}
+                      {pendingRequests.length > 0 && (
+                        <>
+                          <div style={{ fontSize: '0.75rem', color: '#60a5fa', fontWeight: 700, marginBottom: 6, marginTop: 16, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                            <i className="fas fa-paper-plane me-2"></i>Direct Buyer Requests ({pendingRequests.length})
+                          </div>
+                          <div className="gp-bid-table">
+                            <table className="table">
+                              <thead>
+                                <tr><th>Buyer</th><th>Qty</th><th>Price/kg</th><th>Total</th><th>Status</th><th>Action</th></tr>
+                              </thead>
+                              <tbody>
+                                {pendingRequests.map(req => (
+                                  <tr key={req._id}>
+                                    <td><strong>{req.buyerName}</strong></td>
+                                    <td>{req.quantity} kg</td>
+                                    <td>₹{req.amount}/kg</td>
+                                    <td style={{ color: '#22c55e', fontWeight: 600 }}>₹{req.totalAmount?.toLocaleString('en-IN')}</td>
+                                    <td><span className={`badge ${getStatusBadgeClass(req.status)}`}>{req.status}</span></td>
+                                    <td>
+                                      {req.status === 'requested' && !isClosed && (
+                                        <>
+                                          <button className="btn-sm btn-outline-success me-1" onClick={() => acceptDeal(req._id)}>
+                                            <i className="fas fa-check"></i> Accept
+                                          </button>
+                                          <button className="btn-sm btn-outline-danger" onClick={() => rejectDeal(req._id)}>
+                                            <i className="fas fa-times"></i>
+                                          </button>
+                                        </>
+                                      )}
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        </>
+                      )}
+
+                      {/* ====== ACCEPTED REQUESTS (Awaiting Completion) ====== */}
+                      {acceptedRequests.length > 0 && (
+                        <>
+                          <div style={{ fontSize: '0.75rem', color: '#22c55e', fontWeight: 700, marginBottom: 6, marginTop: 16, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                            <i className="fas fa-check-circle me-2"></i>Accepted Deals ({acceptedRequests.length})
+                          </div>
+                          <div className="gp-bid-table">
+                            <table className="table">
+                              <thead>
+                                <tr><th>Buyer</th><th>Qty</th><th>Price/kg</th><th>Total</th><th>Status</th><th>Action</th></tr>
+                              </thead>
+                              <tbody>
+                                {acceptedRequests.map(req => (
+                                  <tr key={req._id}>
+                                    <td><strong>{req.buyerName}</strong></td>
+                                    <td>{req.quantity} kg</td>
+                                    <td>₹{req.amount}/kg</td>
+                                    <td style={{ color: '#22c55e', fontWeight: 600 }}>₹{req.totalAmount?.toLocaleString('en-IN')}</td>
+                                    <td><span className="badge status-active">Paid</span></td>
+                                    <td>
+                                      <button
+                                        className="btn-sm btn-outline-success"
+                                        onClick={() => completeDeal(req._id)}
+                                        title="Mark as delivered after handover"
+                                      >
+                                        <i className="fas fa-truck"></i> Mark Delivered
+                                      </button>
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        </>
+                      )}
+
+                      {/* ====== AWARD BUTTON (only when ended & has bids) ====== */}
+                      {isEnded && !isClosed && sortedBids.length > 0 && (
+                        <div style={{
+                          marginTop: 16,
+                          padding: '14px 16px',
+                          background: 'linear-gradient(135deg, rgba(251,191,36,0.12), rgba(139,92,246,0.08))',
+                          border: '1px solid rgba(251,191,36,0.3)',
+                          borderRadius: 10,
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                          flexWrap: 'wrap',
+                          gap: 12
+                        }}>
+                          <div>
+                            <div style={{ color: '#fbbf24', fontWeight: 700, fontSize: '0.85rem', marginBottom: 2 }}>
+                              <i className="fas fa-flag-checkered me-2"></i>
+                              Bidding Ended
+                            </div>
+                            <div style={{ color: '#9ca3af', fontSize: '0.78rem' }}>
+                              Highest bidder: <strong style={{ color: '#22c55e' }}>{topBid.buyerName}</strong> at <strong style={{ color: '#fbbf24' }}>₹{topBid.amount}/kg</strong>
+                            </div>
+                          </div>
+                          <button
+                            className="gp-btn-primary"
+                            style={{
+                              background: 'linear-gradient(135deg, #fbbf24, #f59e0b)',
+                              boxShadow: '0 4px 14px rgba(251,191,36,0.3)'
+                            }}
+                            onClick={() => handleAutoAward(listing)}
+                          >
+                            <i className="fas fa-crown"></i> Award to Highest Bidder
+                          </button>
                         </div>
                       )}
 
-                      {topBid && listing.status !== 'sold' && listing.status !== 'closed' && (
-                        <div className="gp-bid-cta">
-                          <span>Highest bid so far: <strong>₹{topBid.amount}/kg</strong> by {topBid.buyerName}</span>
-                          <button className="gp-btn-primary" onClick={() => handleAcceptBid(listing._id, topBid.id)}>
-                            <i className="fas fa-gavel"></i> Accept Highest Bid
-                          </button>
-                        </div>
+                      {/* ====== EMPTY STATE ====== */}
+                      {sortedBids.length === 0 && pendingRequests.length === 0 && acceptedRequests.length === 0 && (
+                        <p className="gp-no-data" style={{ padding: '16px 0', textAlign: 'center' }}>
+                          <i className="fas fa-hourglass-half me-2"></i>
+                          Waiting for bids and requests...
+                        </p>
                       )}
                     </div>
                   );
@@ -1098,7 +2477,9 @@ const GeneratorDashboard = () => {
         );
 
       case 'deals': {
-        const myDeals = deals.filter(d => String(d.generatorId) === String(user?._id));
+        // ✅ FIX: user?._id undefined tha, isliye fallback zaroori hai
+        const cid = String(user?._id || user?.id || '');
+        const myDeals = deals.filter(d => String(d.generatorId) === cid);
         const sentOffers = myDeals.filter(d => d.initiatedBy === 'generator');
         const receivedRequests = myDeals.filter(d => d.initiatedBy === 'buyer');
 
@@ -1161,7 +2542,14 @@ const GeneratorDashboard = () => {
                               </>
                             )}
                             {d.status === 'accepted' && (
-                              <button className="btn-sm btn-outline-primary" onClick={() => completeDeal(d._id)}><i className="fas fa-flag-checkered"></i> Complete</button>
+                              <button
+                                className="btn-sm btn-outline-success"
+                                onClick={() => completeDeal(d._id)}
+                                style={{ background: 'rgba(34,197,94,0.15)', color: '#22c55e', borderColor: 'rgba(34,197,94,0.3)' }}
+                                title="Click after material is handed over"
+                              >
+                                <i className="fas fa-truck"></i> Mark as Delivered
+                              </button>
                             )}
                           </td>
                         </tr>
@@ -1175,51 +2563,358 @@ const GeneratorDashboard = () => {
         );
       }
 
-      case 'addMoney':
+      case 'withdraw':
         return (
-          <div className="gp-form-card" style={{ maxWidth: 460 }}>
-            <div className="gp-page-header"><h2>💰 Add Money</h2></div>
-            <div className="gp-wallet-info">
-              <p>Current Balance: <strong>₹{user?.walletBalance || 0}</strong></p>
-              <p className="gp-limit-note">Daily limit: ₹50,000 for generators</p>
+          <div style={{ maxWidth: 720 }}>
+            <div className="gp-page-header">
+              <h2>💸 Withdraw Money</h2>
             </div>
-            <div className="gp-form-group">
-              <label>Amount (₹)</label>
-              <input type="number" value={addMoneyAmount} onChange={(e) => setAddMoneyAmount(e.target.value)} placeholder="Enter amount" />
-              {addMoneyError && <small className="gp-error-text">{addMoneyError}</small>}
+
+            {/* Balance Card */}
+            <div className="gp-form-card" style={{
+              maxWidth: 'none',
+              marginBottom: 20,
+              background: 'linear-gradient(135deg, rgba(34,197,94,0.08), rgba(99,102,241,0.06))',
+              border: '1px solid rgba(34,197,94,0.2)'
+            }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
+                <div>
+                  <div style={{ fontSize: '0.8rem', color: '#9ca3af', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                    <i className="fas fa-wallet me-2"></i>Available Balance
+                  </div>
+                  <div style={{ fontSize: '2rem', fontWeight: 800, color: '#22c55e', letterSpacing: '-0.5px' }}>
+                    ₹{(user?.walletBalance || 0).toLocaleString('en-IN')}
+                  </div>
+                </div>
+                <div style={{ textAlign: 'right' }}>
+                  <div style={{ fontSize: '0.75rem', color: '#9ca3af' }}>
+                    Min: ₹100 · Max: Balance
+                  </div>
+                  <div style={{ fontSize: '0.75rem', color: '#9ca3af', marginTop: 4 }}>
+                    Credit in 24-48 hrs
+                  </div>
+                </div>
+              </div>
             </div>
-            <button className="gp-btn-primary" style={{ width: '100%' }} onClick={handleAddMoney} disabled={addMoneyLoading}>
-              {addMoneyLoading ? 'Processing...' : 'Add Money'}
-            </button>
+
+            {/* Withdrawal Form */}
+            <div className="gp-form-card" style={{ maxWidth: 'none', marginBottom: 20 }}>
+              <h3 style={{ marginTop: 0, color: '#a78bfa', fontSize: '1rem' }}>
+                <i className="fas fa-plus-circle me-2"></i>New Withdrawal Request
+              </h3>
+
+              <div className="gp-form-group">
+                <label>Amount (₹) *</label>
+                <input
+                  type="number"
+                  value={withdrawAmount}
+                  onChange={(e) => setWithdrawAmount(e.target.value)}
+                  placeholder="Enter amount (min ₹100)"
+                  min="100"
+                />
+              </div>
+
+              <div className="gp-form-group">
+                <label>Withdrawal Method *</label>
+                <div style={{ display: 'flex', gap: 10 }}>
+                  <button
+                    type="button"
+                    onClick={() => setWithdrawMethod('upi')}
+                    style={{
+                      flex: 1, padding: '12px', borderRadius: 10,
+                      border: withdrawMethod === 'upi' ? '2px solid #22c55e' : '1px solid rgba(255,255,255,0.1)',
+                      background: withdrawMethod === 'upi' ? 'rgba(34,197,94,0.1)' : 'rgba(255,255,255,0.03)',
+                      color: withdrawMethod === 'upi' ? '#22c55e' : '#9ca3af',
+                      cursor: 'pointer', fontWeight: 600, fontSize: '0.85rem'
+                    }}
+                  >
+                    <i className="fas fa-mobile-alt me-2"></i>UPI
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setWithdrawMethod('bank')}
+                    style={{
+                      flex: 1, padding: '12px', borderRadius: 10,
+                      border: withdrawMethod === 'bank' ? '2px solid #22c55e' : '1px solid rgba(255,255,255,0.1)',
+                      background: withdrawMethod === 'bank' ? 'rgba(34,197,94,0.1)' : 'rgba(255,255,255,0.03)',
+                      color: withdrawMethod === 'bank' ? '#22c55e' : '#9ca3af',
+                      cursor: 'pointer', fontWeight: 600, fontSize: '0.85rem'
+                    }}
+                  >
+                    <i className="fas fa-university me-2"></i>Bank Account
+                  </button>
+                </div>
+              </div>
+
+              {withdrawMethod === 'upi' ? (
+                <div className="gp-form-group">
+                  <label>UPI ID *</label>
+                  <input
+                    type="text"
+                    value={withdrawUPI}
+                    onChange={(e) => setWithdrawUPI(e.target.value)}
+                    placeholder="yourname@upi (e.g. 9876543210@ybl)"
+                  />
+                </div>
+              ) : (
+                <div className="gp-form-grid">
+                  <div className="gp-form-group">
+                    <label>Account Holder Name *</label>
+                    <input
+                      type="text"
+                      value={withdrawBank.accountHolder}
+                      onChange={(e) => setWithdrawBank({ ...withdrawBank, accountHolder: e.target.value })}
+                      placeholder="Full name as on bank"
+                    />
+                  </div>
+                  <div className="gp-form-group">
+                    <label>Account Number *</label>
+                    <input
+                      type="text"
+                      value={withdrawBank.accountNumber}
+                      onChange={(e) => setWithdrawBank({ ...withdrawBank, accountNumber: e.target.value })}
+                      placeholder="1234567890123"
+                    />
+                  </div>
+                  <div className="gp-form-group">
+                    <label>IFSC Code *</label>
+                    <input
+                      type="text"
+                      value={withdrawBank.ifscCode}
+                      onChange={(e) => setWithdrawBank({ ...withdrawBank, ifscCode: e.target.value.toUpperCase() })}
+                      placeholder="HDFC0001234"
+                      maxLength={11}
+                    />
+                  </div>
+                  <div className="gp-form-group">
+                    <label>Bank Name</label>
+                    <input
+                      type="text"
+                      value={withdrawBank.bankName}
+                      onChange={(e) => setWithdrawBank({ ...withdrawBank, bankName: e.target.value })}
+                      placeholder="HDFC Bank"
+                    />
+                  </div>
+                </div>
+              )}
+
+              {withdrawError && <small className="gp-error-text" style={{ display: 'block', marginBottom: 12 }}>{withdrawError}</small>}
+
+              <button
+                className="gp-btn-primary"
+                style={{ width: '100%' }}
+                onClick={handleWithdraw}
+                disabled={withdrawLoading}
+              >
+                {withdrawLoading ? (
+                  <><i className="fas fa-spinner fa-spin me-2"></i>Processing...</>
+                ) : (
+                  <><i className="fas fa-money-bill-wave me-2"></i>Request Withdrawal</>
+                )}
+              </button>
+
+              <div style={{ fontSize: '0.72rem', color: '#6b7280', marginTop: 12, textAlign: 'center' }}>
+                <i className="fas fa-lock me-1" style={{ color: '#22c55e' }}></i>
+                Secured by Razorpay Payouts · Powered by WasteExchange AI
+              </div>
+            </div>
+
+            {/* Withdrawal History */}
+            <div className="gp-form-card" style={{ maxWidth: 'none' }}>
+              <h3 style={{ marginTop: 0, color: '#60a5fa', fontSize: '1rem' }}>
+                <i className="fas fa-history me-2"></i>Withdrawal History ({withdrawals.length})
+              </h3>
+
+              {withdrawals.length === 0 ? (
+                <div className="gp-no-data-block" style={{ padding: '32px 20px' }}>
+                  <i className="fas fa-receipt fa-2x" style={{ color: '#4b5563', marginBottom: 10 }}></i>
+                  <p style={{ fontSize: '0.85rem' }}>No withdrawals yet</p>
+                </div>
+              ) : (
+                <div className="gp-table">
+                  <table className="table">
+                    <thead>
+                      <tr>
+                        <th>Amount</th>
+                        <th>Method</th>
+                        <th>Details</th>
+                        <th>Status</th>
+                        <th>Date</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {withdrawals.map(w => (
+                        <tr key={w._id}>
+                          <td>
+                            <strong style={{ color: '#f87171' }}>-₹{w.amount.toLocaleString('en-IN')}</strong>
+                          </td>
+                          <td>
+                            <span style={{
+                              background: w.method === 'upi' ? 'rgba(139,92,246,0.15)' : 'rgba(96,165,250,0.15)',
+                              color: w.method === 'upi' ? '#a78bfa' : '#60a5fa',
+                              padding: '3px 10px', borderRadius: 8,
+                              fontSize: '0.72rem', fontWeight: 600, textTransform: 'uppercase'
+                            }}>
+                              {w.method}
+                            </span>
+                          </td>
+                          <td>
+                            <small style={{ color: '#9ca3af' }}>
+                              {w.method === 'upi' ? w.upiId : `****${w.bankAccount?.accountNumber?.slice(-4) || ''}`}
+                            </small>
+                          </td>
+                          <td>
+                            <span className={`badge ${w.status === 'completed' ? 'status-active' :
+                              w.status === 'pending' ? 'status-pending' :
+                                w.status === 'processing' ? 'status-pending' :
+                                  'status-closed'
+                              }`}>
+                              {w.status}
+                            </span>
+                          </td>
+                          <td>
+                            <small style={{ color: '#9ca3af' }}>{formatDate(w.createdAt)}</small>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
           </div>
         );
 
-      case 'profile':
+      case 'profile': {
+        const companyFields = [
+          { key: 'companyName', label: 'Company Name', type: 'text' },
+          { key: 'companyRegistrationNo', label: 'Registration Number', type: 'text' },
+          { key: 'gstNumber', label: 'GST Number', type: 'text' },
+          { key: 'panNumber', label: 'PAN Number', type: 'text' },
+          { key: 'companyAddress', label: 'Company Address', type: 'textarea' },
+          { key: 'companyCity', label: 'City', type: 'text' },
+          { key: 'companyState', label: 'State', type: 'text' },
+          { key: 'companyPincode', label: 'Pincode', type: 'text' },
+          { key: 'companyCountry', label: 'Country', type: 'text' },
+          { key: 'website', label: 'Website', type: 'url' },
+          { key: 'yearEstablished', label: 'Year Established', type: 'number' },
+          { key: 'contactPerson', label: 'Contact Person', type: 'text' },
+          { key: 'contactPhone', label: 'Contact Phone', type: 'tel' },
+          { key: 'contactEmail', label: 'Contact Email', type: 'email' },
+        ];
+
         return (
-          <div className="gp-form-card" style={{ maxWidth: 560 }}>
-            <div className="gp-page-header"><h2>👤 My Profile</h2></div>
+          <div style={{ maxWidth: 900 }}>
+            <div className="gp-page-header">
+              <h2>👤 My Profile</h2>
+              <span style={{
+                background: profileForm.isCompanyVerified ? 'rgba(34,197,94,0.15)' : 'rgba(251,191,36,0.15)',
+                color: profileForm.isCompanyVerified ? '#22c55e' : '#fbbf24',
+                padding: '6px 14px',
+                borderRadius: 20,
+                fontSize: '0.72rem',
+                fontWeight: 700,
+                border: `1px solid ${profileForm.isCompanyVerified ? 'rgba(34,197,94,0.3)' : 'rgba(251,191,36,0.3)'}`,
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 6
+              }}>
+                <i className={`fas fa-${profileForm.isCompanyVerified ? 'check-circle' : 'clock'}`}></i>
+                {profileForm.isCompanyVerified ? 'Company Verified' : 'Verification Pending'}
+              </span>
+            </div>
+
             <form onSubmit={handleProfileUpdate}>
-              <div className="gp-form-group">
-                <label>Name</label>
-                <input type="text" value={profileForm.name} onChange={(e) => setProfileForm({ ...profileForm, name: e.target.value })} />
-                {profileErrors.name && <small className="gp-error-text">{profileErrors.name}</small>}
+              {/* === ACCOUNT INFO === */}
+              <div className="gp-form-card" style={{ maxWidth: 'none', marginBottom: 20 }}>
+                <h3 style={{ marginTop: 0, color: '#a78bfa', fontSize: '1rem', marginBottom: 18 }}>
+                  <i className="fas fa-user me-2"></i>Account Information
+                </h3>
+                <div className="gp-form-grid">
+                  <div className="gp-form-group">
+                    <label>Name *</label>
+                    <input type="text" value={profileForm.name} onChange={(e) => setProfileForm({ ...profileForm, name: e.target.value })} />
+                    {profileErrors.name && <small className="gp-error-text">{profileErrors.name}</small>}
+                  </div>
+                  <div className="gp-form-group">
+                    <label>Email *</label>
+                    <input type="email" value={profileForm.email} onChange={(e) => setProfileForm({ ...profileForm, email: e.target.value })} />
+                    {profileErrors.email && <small className="gp-error-text">{profileErrors.email}</small>}
+                  </div>
+                  <div className="gp-form-group">
+                    <label>Phone</label>
+                    <input type="tel" value={profileForm.phone || ''} onChange={(e) => setProfileForm({ ...profileForm, phone: e.target.value })} placeholder="10-digit mobile" />
+                  </div>
+                  <div className="gp-form-group">
+                    <label>New Password</label>
+                    <input type="password" value={profileForm.password} onChange={(e) => setProfileForm({ ...profileForm, password: e.target.value })} placeholder="Leave blank to keep current" />
+                    {profileErrors.password && <small className="gp-error-text">{profileErrors.password}</small>}
+                  </div>
+                </div>
               </div>
-              <div className="gp-form-group">
-                <label>Email</label>
-                <input type="email" value={profileForm.email} onChange={(e) => setProfileForm({ ...profileForm, email: e.target.value })} />
-                {profileErrors.email && <small className="gp-error-text">{profileErrors.email}</small>}
+
+              {/* === COMPANY INFO === */}
+              <div className="gp-form-card" style={{ maxWidth: 'none', marginBottom: 20 }}>
+                <h3 style={{ marginTop: 0, color: '#60a5fa', fontSize: '1rem', marginBottom: 18 }}>
+                  <i className="fas fa-building me-2"></i>Company Information
+                </h3>
+                <div className="gp-form-grid">
+                  {companyFields.map(field => (
+                    <div
+                      key={field.key}
+                      className="gp-form-group"
+                      style={{ gridColumn: field.type === 'textarea' ? '1/-1' : 'auto' }}
+                    >
+                      <label>{field.label}</label>
+                      {field.type === 'textarea' ? (
+                        <textarea
+                          rows={2}
+                          value={profileForm[field.key] || ''}
+                          onChange={(e) => setProfileForm({ ...profileForm, [field.key]: e.target.value })}
+                        />
+                      ) : (
+                        <input
+                          type={field.type}
+                          value={profileForm[field.key] || ''}
+                          onChange={(e) => setProfileForm({ ...profileForm, [field.key]: e.target.value })}
+                        />
+                      )}
+                    </div>
+                  ))}
+                  <div className="gp-form-group" style={{ gridColumn: '1/-1' }}>
+                    <label>Company Type</label>
+                    <select value={profileForm.companyType || 'private'} onChange={(e) => setProfileForm({ ...profileForm, companyType: e.target.value })}>
+                      <option value="private">Private Limited</option>
+                      <option value="public">Public Limited</option>
+                      <option value="partnership">Partnership</option>
+                      <option value="sole">Sole Proprietorship</option>
+                      <option value="llp">LLP</option>
+                      <option value="other">Other</option>
+                    </select>
+                  </div>
+                  <div className="gp-form-group" style={{ gridColumn: '1/-1' }}>
+                    <label>Business Description</label>
+                    <textarea
+                      rows={3}
+                      value={profileForm.businessDescription || ''}
+                      onChange={(e) => setProfileForm({ ...profileForm, businessDescription: e.target.value })}
+                      placeholder="Brief about your business..."
+                    />
+                  </div>
+                </div>
               </div>
-              <div className="gp-form-group">
-                <label>New Password (leave blank to keep current)</label>
-                <input type="password" value={profileForm.password} onChange={(e) => setProfileForm({ ...profileForm, password: e.target.value })} placeholder="Enter new password" />
-                {profileErrors.password && <small className="gp-error-text">{profileErrors.password}</small>}
-              </div>
-              <button type="submit" className="gp-btn-primary" disabled={profileLoading}>
-                {profileLoading ? 'Updating...' : 'Update Profile'}
+
+              <button type="submit" className="gp-btn-primary" disabled={profileLoading} style={{ width: '100%' }}>
+                {profileLoading ? (
+                  <><i className="fas fa-spinner fa-spin me-2"></i>Saving...</>
+                ) : (
+                  <><i className="fas fa-save me-2"></i>Save All Changes</>
+                )}
               </button>
             </form>
           </div>
         );
+      }
 
       default:
         return null;
@@ -1463,7 +3158,7 @@ const GeneratorDashboard = () => {
             <div className="gp-avatar">{user?.name?.charAt(0) || 'G'}</div>
             <div className="gp-user-info">
               <h4>{user?.name || 'Generator'}</h4>
-              <p>Waste Generator</p>
+              <p>Generator · ₹{(user?.walletBalance || 0).toLocaleString('en-IN')}</p>
             </div>
           </div>
         )}
@@ -1481,6 +3176,7 @@ const GeneratorDashboard = () => {
           </div>
           <div className="gp-actions">
             <div className="gp-search"><i className="fas fa-search"></i><input type="text" placeholder="Search..." /></div>
+            <ThemeToggle />
             <div className="gp-notification"><i className="fas fa-bell"></i>{unreadCount > 0 && <span className="gp-dot"></span>}</div>
             <button className="gp-logout" onClick={handleLogout}><i className="fas fa-sign-out-alt"></i> Logout</button>
           </div>
@@ -1609,7 +3305,35 @@ const GeneratorDashboard = () => {
         .gp-form-card { background: rgba(255,255,255,0.03); border-radius: 14px; padding: 24px; border: 1px solid rgba(255,255,255,0.05); max-width: 760px; }
         .gp-form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; }
         .gp-form-group label { display: block; margin-bottom: 6px; font-size: 0.85rem; font-weight: 600; color: #d1d5db; }
-        .gp-form-group input, .gp-form-group select, .gp-form-group textarea { width: 100%; padding: 9px 12px; border-radius: 9px; border: 1px solid rgba(255,255,255,0.1); background: rgba(255,255,255,0.05); color: white; font-size: 0.9rem; }
+        .gp-form-group input,
+.gp-form-group select,
+.gp-form-group textarea {
+  width: 100%; padding: 9px 12px; border-radius: 9px;
+  border: 1px solid var(--gp-input-border);
+  background: var(--gp-input-bg);
+  color: var(--gp-text-primary);
+  font-size: 0.9rem;
+  transition: background 0.3s, border-color 0.3s, color 0.3s;
+  color-scheme: dark;
+}
+
+[data-theme="light"] .gp-form-group input,
+[data-theme="light"] .gp-form-group select,
+[data-theme="light"] .gp-form-group textarea {
+  color-scheme: light;
+}
+
+/* ✅ Fix dropdown options visibility */
+.gp-form-group select option {
+  background: #1a1a2e;
+  color: #ffffff;
+  padding: 8px;
+}
+
+[data-theme="light"] .gp-form-group select option {
+  background: #ffffff;
+  color: #0f172a;
+}
         .gp-form-group input::placeholder { color: #6b7280; }
         .gp-error-text { color: #f87171; font-size: 0.78rem; margin-top: 4px; display: block; }
         .gp-dropzone { border: 2px dashed rgba(255,255,255,0.1); border-radius: 12px; padding: 24px; text-align: center; cursor: pointer; color: #6b7280; transition: 0.15s; background: rgba(255,255,255,0.02); }
@@ -1680,7 +3404,44 @@ const GeneratorDashboard = () => {
           .gp-conv-panel { max-height: 220px; }
           .gp-chat-panel { min-height: 400px; }
         }
-      `}</style>
+          .gp-loading-container { min-height: 100vh; display: flex; align-items: center; justify-content: center; background: #0a0a0f; }
+.gp-loading-card { text-align: center; }
+.gp-loading-logo { display: flex; flex-direction: column; align-items: center; gap: 12px; }
+.gp-loading-logo-icon {
+  width: 84px; height: 84px; border-radius: 22px;
+  background: linear-gradient(135deg, #6366f1, #8b5cf6);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 2.4rem; color: white;
+  animation: gp-logo-pulse 1.6s ease-in-out infinite;
+  box-shadow: 0 8px 32px rgba(99,102,241,0.4);
+}
+@keyframes gp-logo-pulse {
+  0%, 100% { transform: scale(1); box-shadow: 0 8px 32px rgba(99,102,241,0.4); }
+  50% { transform: scale(1.08); box-shadow: 0 12px 40px rgba(99,102,241,0.6); }
+}
+.gp-loading-logo-text {
+  margin: 0; font-size: 1.7rem; font-weight: 800;
+  background: linear-gradient(135deg, #a78bfa, #60a5fa);
+  -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+  background-clip: text; letter-spacing: -0.5px;
+}
+.gp-loading-tagline { margin: 0; color: #6b7280; font-size: 0.85rem; letter-spacing: 0.4px; }
+.gp-loading-bar {
+  width: 220px; height: 3px; background: rgba(255,255,255,0.06);
+  border-radius: 999px; overflow: hidden; margin-top: 18px;
+}
+.gp-loading-bar-fill {
+  height: 100%; width: 40%;
+  background: linear-gradient(90deg, #6366f1, #8b5cf6);
+  border-radius: 999px;
+  animation: gp-loading-slide 1.4s ease-in-out infinite;
+}
+@keyframes gp-loading-slide {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(350%); }
+}
+      `}
+      </style>
     </div>
   );
 };

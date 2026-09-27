@@ -3,6 +3,7 @@ const mongoose = require('mongoose');
 
 const DealSchema = new mongoose.Schema({
   listingId: { type: mongoose.Schema.Types.ObjectId, ref: 'Listing', required: true },
+  requirementId: { type: mongoose.Schema.Types.ObjectId, ref: 'Requirement', default: null }, // ✅ NEW
   generatorId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   generatorName: { type: String, default: '' },
   buyerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
@@ -21,6 +22,8 @@ const DealSchema = new mongoose.Schema({
     enum: ['requested', 'offered', 'accepted', 'rejected', 'completed', 'cancelled'],
     default: 'requested'
   },
+  paymentMethod: { type: String, enum: ['wallet', 'razorpay'], default: 'wallet' },
+  razorpayPaymentId: { type: String, default: '' },
   initiatedBy: { type: String, enum: ['buyer', 'generator'], default: 'buyer' }
 }, { timestamps: true });
 

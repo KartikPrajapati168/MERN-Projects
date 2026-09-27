@@ -1,46 +1,45 @@
+// backend/routes/admin.js
 const express = require('express');
 const router = express.Router();
 const Deal = require('../models/Deal');
 const User = require('../models/User');
-const auth = require('../middleware/auth');
+const { authMiddleware, adminOnly } = require('../middleware/auth');
 
-router.get('/stats', auth, async (req, res) => {
+router.use(authMiddleware, adminOnly);
+
+// @route   GET /api/admin/stats
+router.get('/stats', async (req, res) => {
   try {
-    const user = await User.findById(req.userId);
-    if (user.role !== 'admin') return res.status(403).json({ msg: 'Access denied' });
-
-    const totalRevenue = await Deal.aggregate([
-      { $match: { status: 'completed' } },
-      { $group: { _id: null, total: { $sum: '$platformRevenue' } } }
+    const totalRevenueAgg = await Deal.aggregate([
+      { $match: { status: { $in: ['accepted', 'completed'] } } },
+      { $group: { _id: null, total: { $sum: '$platformRevenue' } } },
     ]);
-
-    const totalDeals = await Deal.countDocuments({ status: 'completed' });
+    const totalDeals = await Deal.countDocuments({ status: { $in: ['accepted', 'completed'] } });
+    const completedDeals = await Deal.countDocuments({ status: 'completed' });
     const totalUsers = await User.countDocuments();
     const totalGenerators = await User.countDocuments({ role: 'generator' });
     const totalBuyers = await User.countDocuments({ role: 'buyer' });
 
     res.json({
-      totalRevenue: totalRevenue[0]?.total || 0,
-      totalDeals,
-      totalUsers,
-      totalGenerators,
-      totalBuyers
+      totalRevenue: totalRevenueAgg[0]?.total || 0,
+      totalDeals, completedDeals, totalUsers, totalGenerators, totalBuyers,
     });
   } catch (err) {
+    console.error('❌ /admin/stats error:', err);
     res.status(500).json({ msg: err.message });
   }
 });
 
-
-// ✅ NEW: @route   GET /api/admin/users (Fetch all users for Admin dashboard)
-router.get('/users', auth, async (req, res) => {
+// @route   GET /api/admin/users
+router.get('/users', async (req, res) => {
   try {
-    const admin = await User.findById(req.userId);
-    if (admin.role !== 'admin') return res.status(403).json({ msg: 'Access denied' });
-
-    const users = await User.find().select('-password').sort({ createdAt: -1 });
+    // ✅ Exclude admin role from user list (admin is fixed, not a real user)
+    const users = await User.find({ role: { $ne: 'admin' } })
+      .select('-password')
+      .sort({ createdAt: -1 });
     res.json(users);
   } catch (err) {
+    console.error('❌ /admin/users error:', err);
     res.status(500).json({ msg: err.message });
   }
 });

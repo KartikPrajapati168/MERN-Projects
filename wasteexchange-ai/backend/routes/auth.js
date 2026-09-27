@@ -3,91 +3,106 @@ const router = express.Router();
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
-const auth = require('../middleware/auth');
-const upload = require('../middleware/upload'); // ✅ ADD THIS
+const AdminProfile = require('../models/AdminProfile');   // ✅ NEW
+const { authMiddleware, adminOnly } = require('../middleware/auth');
+const auth = authMiddleware;
+const upload = require('../middleware/upload');
 
+// ✅ Fixed admin credentials
+const FIXED_ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'admin@wasteexchange.ai';
+const FIXED_ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'WasteExchange@2026';
+const FIXED_ADMIN_ID = 'admin-fixed-001';
+const FIXED_ADMIN_NAME = process.env.ADMIN_NAME || 'System Administrator';
+
+const isFixedAdmin = (req) => req.user?.id === FIXED_ADMIN_ID || req.user?.role === 'admin';
+
+// ✅ Helper: get admin profile (from DB, fallback to .env defaults)
+const getAdminProfile = async () => {
+  try {
+    let profile = await AdminProfile.findById(FIXED_ADMIN_ID);
+    if (!profile) {
+      // Auto-create if missing
+      profile = await AdminProfile.create({
+        _id: FIXED_ADMIN_ID,
+        name: FIXED_ADMIN_NAME,
+        email: FIXED_ADMIN_EMAIL,
+      });
+    }
+    return profile;
+  } catch (err) {
+    console.error('AdminProfile fetch failed:', err.message);
+    // Fallback to .env defaults
+    return {
+      _id: FIXED_ADMIN_ID,
+      id: FIXED_ADMIN_ID,
+      name: FIXED_ADMIN_NAME,
+      email: FIXED_ADMIN_EMAIL,
+      phone: '',
+      profilePhoto: '',
+      role: 'admin',
+      isCompanyVerified: true,
+      isCompanyRegistered: true,
+      walletBalance: 0,
+    };
+  }
+};
+
+// ✅ Helper: format admin profile for frontend
+const formatAdminProfile = (profile) => ({
+  _id: FIXED_ADMIN_ID,
+  id: FIXED_ADMIN_ID,
+  name: profile.name || FIXED_ADMIN_NAME,
+  email: profile.email || FIXED_ADMIN_EMAIL,
+  phone: profile.phone || '',
+  profilePhoto: profile.profilePhoto || '',
+  role: 'admin',
+  isCompanyVerified: true,
+  isCompanyRegistered: true,
+  walletBalance: 0,
+});
+
+// ============================================================
 // @route   POST /api/auth/signup
-// @desc    Register a new user
-// @access  Public
+// ============================================================
 router.post('/signup', async (req, res) => {
   try {
-    console.log('📝 Signup request received');
-    console.log('Request body:', { ...req.body, password: '***' });
-
     const { name, email, password, role } = req.body;
 
-    // Validate input
+    if (role === 'admin') {
+      return res.status(403).json({ msg: 'Admin accounts cannot be created via signup.' });
+    }
+    if (email.toLowerCase() === FIXED_ADMIN_EMAIL.toLowerCase()) {
+      return res.status(403).json({ msg: 'This email is reserved.' });
+    }
+    if (!['buyer', 'generator'].includes(role)) {
+      return res.status(400).json({ msg: 'Invalid role selected.' });
+    }
     if (!name || !email || !password) {
-      console.log('❌ Missing required fields');
-      return res.status(400).json({ 
-        success: false,
-        msg: 'Please provide name, email and password' 
-      });
+      return res.status(400).json({ success: false, msg: 'Please provide name, email and password' });
     }
-
     if (password.length < 6) {
-      console.log('❌ Password too short');
-      return res.status(400).json({ 
-        success: false,
-        msg: 'Password must be at least 6 characters' 
-      });
+      return res.status(400).json({ success: false, msg: 'Password must be at least 6 characters' });
     }
 
-    // Check if user exists
     const existingUser = await User.findOne({ email: email.toLowerCase().trim() });
     if (existingUser) {
-      console.log('❌ User already exists:', email);
-      return res.status(400).json({ 
-        success: false,
-        msg: 'User already exists with this email' 
-      });
+      return res.status(400).json({ success: false, msg: 'User already exists with this email' });
     }
 
-    // Create new user WITHOUT hashing password here - let the pre-save hook handle it
-    console.log('✅ Creating new user...');
     const user = new User({
       name: name.trim(),
       email: email.toLowerCase().trim(),
-      password: password, // This will be hashed in pre-save hook
-      role: role || 'buyer'
+      password,
+      role: role || 'buyer',
     });
+    await user.save();
 
-    // Save user to database with try-catch specifically for this operation
-    try {
-      await user.save();
-      console.log('✅ User saved successfully:', user._id);
-    } catch (saveError) {
-      console.error('❌ Error saving user:', saveError);
-      // Check if it's a validation error
-      if (saveError.name === 'ValidationError') {
-        const errors = Object.values(saveError.errors).map(e => e.message);
-        return res.status(400).json({
-          success: false,
-          msg: 'Validation error',
-          errors: errors
-        });
-      }
-      throw saveError; // re-throw for outer catch
-    }
-
-    // Create JWT payload
-    const payload = {
-      user: {
-        id: user._id,
-        role: user.role
-      }
-    };
-
-    // Sign token
     const token = jwt.sign(
-      payload,
-      process.env.JWT_SECRET || 'your_jwt_secret_key',
+      { user: { id: user._id, role: user.role } },
+      process.env.JWT_SECRET,
       { expiresIn: '7d' }
     );
 
-    console.log('✅ Token generated successfully');
-
-    // Return response
     res.status(201).json({
       success: true,
       token,
@@ -99,79 +114,58 @@ router.post('/signup', async (req, res) => {
         walletBalance: user.walletBalance || 0,
         isCompanyRegistered: user.isCompanyRegistered || false,
         isCompanyVerified: user.isCompanyVerified || false,
-      }
+      },
     });
-
   } catch (err) {
     console.error('❌ Signup error:', err);
-    console.error('Error stack:', err.stack);
-    
-    // Send detailed error in development
-    res.status(500).json({ 
-      success: false,
-      msg: 'Server error during signup',
-      error: process.env.NODE_ENV === 'development' ? err.message : undefined,
-      details: process.env.NODE_ENV === 'development' ? err.stack : undefined
-    });
+    res.status(500).json({ success: false, msg: 'Server error during signup' });
   }
 });
 
+// ============================================================
 // @route   POST /api/auth/login
-// @desc    Authenticate user & get token
-// @access  Public
+// ============================================================
 router.post('/login', async (req, res) => {
   try {
-    console.log('🔐 Login request received');
-    console.log('Email:', req.body.email);
-
     const { email, password } = req.body;
 
-    // Validate input
     if (!email || !password) {
-      return res.status(400).json({ 
-        success: false,
-        msg: 'Please provide email and password' 
-      });
+      return res.status(400).json({ success: false, msg: 'Please provide email and password' });
     }
 
-    // Check for user
-    const user = await User.findOne({ email: email.toLowerCase().trim() });
-    if (!user) {
-      console.log('❌ User not found:', email);
-      return res.status(400).json({ 
-        success: false,
-        msg: 'Invalid credentials' 
-      });
-    }
-
-    // Check password using comparePassword method
-    const isMatch = await user.comparePassword(password);
-    if (!isMatch) {
-      console.log('❌ Invalid password for:', email);
-      return res.status(400).json({ 
-        success: false,
-        msg: 'Invalid credentials' 
-      });
-    }
-
-    console.log('✅ User authenticated:', user._id);
-
-    // Create JWT payload
-    const payload = {
-      user: {
-        id: user.id,
-        role: user.role
+    // 🔐 FIXED ADMIN LOGIN — password from .env, profile from DB
+    if (email.toLowerCase() === FIXED_ADMIN_EMAIL.toLowerCase()) {
+      if (password !== FIXED_ADMIN_PASSWORD) {
+        return res.status(401).json({ msg: 'Invalid admin credentials.' });
       }
-    };
 
-    // Sign token
+      const adminProfile = await getAdminProfile();
+
+      const token = jwt.sign(
+        { id: FIXED_ADMIN_ID, role: 'admin', email: FIXED_ADMIN_EMAIL, name: FIXED_ADMIN_NAME },
+        process.env.JWT_SECRET,
+        { expiresIn: '7d' }
+      );
+
+      return res.json({
+        success: true,
+        token,
+        user: formatAdminProfile(adminProfile),
+      });
+    }
+
+    const user = await User.findOne({ email: email.toLowerCase().trim() });
+    if (!user) return res.status(400).json({ success: false, msg: 'Invalid credentials' });
+
+    const isMatch = await user.comparePassword(password);
+    if (!isMatch) return res.status(400).json({ success: false, msg: 'Invalid credentials' });
+
     const token = jwt.sign(
-      payload,
-      process.env.JWT_SECRET || 'your_jwt_secret_key',
+      { user: { id: user._id, role: user.role } },
+      process.env.JWT_SECRET,
       { expiresIn: '7d' }
     );
 
-    // Return user data
     const userData = {
       id: user._id,
       name: user.name,
@@ -179,7 +173,7 @@ router.post('/login', async (req, res) => {
       role: user.role,
       walletBalance: user.walletBalance || 0,
       trustScore: user.trustScore || 0,
-      profilePhoto: user.profilePhoto || '', 
+      profilePhoto: user.profilePhoto || '',
       isCompanyRegistered: user.isCompanyRegistered || false,
       isCompanyVerified: user.isCompanyVerified || false,
       companyName: user.companyName || '',
@@ -198,210 +192,143 @@ router.post('/login', async (req, res) => {
       longitude: user.longitude || '',
     };
 
-    res.json({
-      success: true,
-      token,
-      user: userData
-    });
-
+    res.json({ success: true, token, user: userData });
   } catch (err) {
     console.error('❌ Login error:', err);
-    res.status(500).json({ 
-      success: false,
-      msg: 'Server error during login',
-      error: process.env.NODE_ENV === 'development' ? err.message : undefined
-    });
+    res.status(500).json({ success: false, msg: 'Server error during login' });
   }
 });
 
+// ============================================================
 // @route   GET /api/auth/me
-// @desc    Get current user data
-// @access  Private
-router.get('/me', auth, async (req, res) => {
+// ============================================================
+router.get('/me', authMiddleware, async (req, res) => {
   try {
-    const user = await User.findById(req.user.id).select('-password');
-    if (!user) {
-      return res.status(404).json({ 
-        success: false,
-        msg: 'User not found' 
-      });
+    if (isFixedAdmin(req)) {
+      const profile = await getAdminProfile();
+      return res.json({ success: true, user: formatAdminProfile(profile) });
     }
-    res.json({
-      success: true,
-      user
-    });
+
+    const user = await User.findById(req.user.id).select('-password');
+    if (!user) return res.status(404).json({ success: false, msg: 'User not found' });
+    res.json({ success: true, user });
   } catch (err) {
-    console.error('Get user error:', err);
-    res.status(500).json({ 
-      success: false,
-      msg: 'Server error' 
-    });
+    console.error('❌ /me error:', err);
+    res.status(500).json({ success: false, msg: 'Server error' });
   }
 });
 
+// ============================================================
 // @route   POST /api/auth/register-company
-// @desc    Register company for user
-// @access  Private
-router.post('/register-company', auth, async (req, res) => {
+// ============================================================
+router.post('/register-company', authMiddleware, async (req, res) => {
   try {
-    console.log('🏢 Company registration request');
-    const userId = req.user.id;
-    const user = await User.findById(userId);
-    
-    if (!user) {
-      return res.status(404).json({ 
-        success: false,
-        msg: 'User not found' 
-      });
-    }
+    const user = await User.findById(req.user.id);
+    if (!user) return res.status(404).json({ success: false, msg: 'User not found' });
 
     const {
-      companyName,
-      companyRegistrationNo,
-      gstNumber,
-      panNumber,
-      companyType,
-      website,
-      yearEstablished,
-      businessDescription,
-      companyAddress,
-      companyCity,
-      companyState,
-      companyPincode,
-      country,
-      latitude,
-      longitude,
-      contactPerson,
-      contactPhone,
-      contactEmail
+      companyName, companyRegistrationNo, gstNumber, panNumber, companyType,
+      website, yearEstablished, businessDescription, companyAddress,
+      companyCity, companyState, companyPincode, country, latitude, longitude,
+      contactPerson, contactPhone, contactEmail,
     } = req.body;
 
-    // Validate required fields
     if (!companyName || !companyRegistrationNo || !gstNumber || !panNumber) {
-      return res.status(400).json({ 
-        success: false,
-        msg: 'Please provide all required company information' 
-      });
+      return res.status(400).json({ success: false, msg: 'Please provide all required company information' });
     }
 
-    // Update user with company details
-    user.companyName = companyName;
-    user.companyRegistrationNo = companyRegistrationNo;
-    user.gstNumber = gstNumber;
-    user.panNumber = panNumber;
-    user.companyType = companyType || 'private';
-    user.website = website || '';
-    user.yearEstablished = yearEstablished ? parseInt(yearEstablished) : null;
-    user.businessDescription = businessDescription || '';
-    user.companyAddress = companyAddress;
-    user.companyCity = companyCity;
-    user.companyState = companyState;
-    user.companyPincode = companyPincode;
-    user.companyCountry = country || 'India';
-    user.latitude = latitude || '';
-    user.longitude = longitude || '';
-    user.contactPerson = contactPerson || '';
-    user.contactPhone = contactPhone || '';
-    user.contactEmail = contactEmail || '';
+    Object.assign(user, {
+      companyName, companyRegistrationNo, gstNumber, panNumber,
+      companyType: companyType || 'private',
+      website: website || '',
+      yearEstablished: yearEstablished ? parseInt(yearEstablished) : null,
+      businessDescription: businessDescription || '',
+      companyAddress, companyCity, companyState, companyPincode,
+      companyCountry: country || 'India',
+      latitude: latitude || '',
+      longitude: longitude || '',
+      contactPerson: contactPerson || '',
+      contactPhone: contactPhone || '',
+      contactEmail: contactEmail || '',
+      isCompanyRegistered: true,
+      isCompanyVerified: false,
+    });
 
-    // Set location for geospatial queries
     if (latitude && longitude) {
-      user.location = {
-        type: 'Point',
-        coordinates: [parseFloat(longitude), parseFloat(latitude)]
-      };
+      user.location = { type: 'Point', coordinates: [parseFloat(longitude), parseFloat(latitude)] };
     }
-
-    user.isCompanyRegistered = true;
-    user.isCompanyVerified = false;
 
     await user.save();
-    console.log('✅ Company registered for user:', user._id);
-
-    res.json({
-      success: true,
-      msg: 'Company registered successfully',
-      user: {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        role: user.role,
-        isCompanyRegistered: user.isCompanyRegistered,
-        isCompanyVerified: user.isCompanyVerified,
-        companyName: user.companyName,
-        companyRegistrationNo: user.companyRegistrationNo,
-        gstNumber: user.gstNumber,
-        panNumber: user.panNumber,
-        companyType: user.companyType,
-        companyAddress: user.companyAddress,
-        companyCity: user.companyCity,
-        companyState: user.companyState,
-        companyPincode: user.companyPincode,
-        companyCountry: user.companyCountry,
-        latitude: user.latitude,
-        longitude: user.longitude,
-        contactPerson: user.contactPerson,
-        contactPhone: user.contactPhone,
-        contactEmail: user.contactEmail,
-        walletBalance: user.walletBalance,
-        profilePicture: user.profilePicture
-      }
-    });
-
+    res.json({ success: true, msg: 'Company registered successfully', user });
   } catch (err) {
     console.error('❌ Company registration error:', err);
-    res.status(500).json({ 
-      success: false,
-      msg: 'Server error during company registration',
-      error: process.env.NODE_ENV === 'development' ? err.message : undefined
-    });
+    res.status(500).json({ success: false, msg: 'Server error' });
   }
 });
 
-// routes/auth.js me add karo (Admin Verification)
-router.get('/unverified-companies', auth, async (req, res) => {
+// ============================================================
+// ADMIN: Unverified companies
+// ============================================================
+router.get('/unverified-companies', authMiddleware, adminOnly, async (req, res) => {
   try {
     const companies = await User.find({ isCompanyRegistered: true, isCompanyVerified: false });
-    console.log(`📋 Found ${companies.length} pending verifications`);
     res.json(companies);
-  } catch (err) { res.status(500).json({ msg: err.message }); }
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
 });
 
-router.put('/verify-company/:id', auth, async (req, res) => {
+router.put('/verify-company/:id', authMiddleware, adminOnly, async (req, res) => {
   try {
     const user = await User.findByIdAndUpdate(req.params.id, { isCompanyVerified: true }, { new: true });
     res.json({ success: true, user });
-  } catch (err) { res.status(500).json({ msg: err.message }); }
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
 });
 
-router.post('/reject-company/:id', auth, async (req, res) => {
+router.post('/reject-company/:id', authMiddleware, adminOnly, async (req, res) => {
   try {
     await User.findByIdAndUpdate(req.params.id, { isCompanyRegistered: false, isCompanyVerified: false });
     res.json({ success: true, msg: 'Rejected' });
-  } catch (err) { res.status(500).json({ msg: err.message }); }
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
 });
 
-
-// @route   PUT /api/auth/profile-photo
-// @desc    Upload/Update profile photo
-// @access  Private
-router.put('/profile-photo', auth, upload.single('profilePhoto'), async (req, res) => {
+// ============================================================
+// ✅ PUT /api/auth/profile-photo
+// 🔧 FIXED: Admin profile stored in AdminProfile collection (persists!)
+// ============================================================
+router.put('/profile-photo', authMiddleware, upload.single('profilePhoto'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ msg: 'No file uploaded' });
-    
-    // const photoUrl = `/uploads/profile/${req.file.filename}`;
-    // ✅ Full URL banao (http://localhost:5000/uploads/profile/xxx.jpg)
+
     const photoUrl = `${req.protocol}://${req.get('host')}/uploads/profile/${req.file.filename}`;
-    
+
+    // ✅ ADMIN: Save to AdminProfile collection
+    if (isFixedAdmin(req)) {
+      const updated = await AdminProfile.findByIdAndUpdate(
+        FIXED_ADMIN_ID,
+        { profilePhoto: photoUrl },
+        { new: true, upsert: true, setDefaultsOnInsert: true }
+      );
+      console.log(`📸 Admin photo saved to DB: ${photoUrl}`);
+      return res.json({
+        success: true,
+        profilePhoto: photoUrl,
+        user: formatAdminProfile(updated),
+      });
+    }
+
+    // Regular user
     const user = await User.findByIdAndUpdate(
-      req.userId,
+      req.user.id,
       { profilePhoto: photoUrl },
       { new: true }
     ).select('-password');
-    
+
     if (!user) return res.status(404).json({ msg: 'User not found' });
-    
-    console.log(`✅ Profile photo updated for user: ${user._id}`);
     res.json({ success: true, profilePhoto: photoUrl, user });
   } catch (err) {
     console.error('❌ Profile photo update error:', err);
@@ -409,19 +336,117 @@ router.put('/profile-photo', auth, upload.single('profilePhoto'), async (req, re
   }
 });
 
-// @route   PUT /api/auth/profile
-// @desc    Update name/email
-// @access  Private
-router.put('/profile', auth, async (req, res) => {
+// ============================================================
+// ✅ PUT /api/auth/profile
+// 🔧 FIXED: Admin profile stored in AdminProfile collection
+// ============================================================
+router.put('/profile', authMiddleware, async (req, res) => {
   try {
-    const { name, email, phone } = req.body;
-    const user = await User.findByIdAndUpdate(
-      req.userId,
-      { name, email, phone },
-      { new: true }
-    ).select('-password');
+    // Admin case
+    if (isFixedAdmin(req)) {
+      const { name, email, phone } = req.body;
+      const updated = await AdminProfile.findByIdAndUpdate(
+        FIXED_ADMIN_ID,
+        {
+          ...(name && { name }),
+          ...(email && { email }),
+          ...(phone !== undefined && { phone }),
+        },
+        { new: true, upsert: true, setDefaultsOnInsert: true }
+      );
+      return res.json(formatAdminProfile(updated));
+    }
+
+    // Regular user
+    const {
+      name, email, phone,
+      password,   // ✅ Accept password
+      companyName, companyRegistrationNo, companyAddress, companyCity,
+      companyState, companyPincode, companyCountry, gstNumber, panNumber,
+      companyType, website, yearEstablished, businessDescription,
+      contactPerson, contactPhone, contactEmail, latitude, longitude,
+    } = req.body;
+
+    // ✅ findById (not findByIdAndUpdate) → triggers pre-save hook
+    const user = await User.findById(req.user.id);
+    if (!user) return res.status(404).json({ msg: 'User not found' });
+
+    // Email conflict check
+    if (email && email.toLowerCase().trim() !== user.email) {
+      const existing = await User.findOne({ email: email.toLowerCase().trim() });
+      if (existing && String(existing._id) !== String(user._id)) {
+        return res.status(400).json({ msg: 'Email already in use' });
+      }
+    }
+
+    // Update all non-password fields
+    if (name !== undefined) user.name = name;
+    if (email !== undefined) user.email = email.toLowerCase().trim();
+    if (phone !== undefined) user.phone = phone;
+    if (companyName !== undefined) user.companyName = companyName;
+    if (companyRegistrationNo !== undefined) user.companyRegistrationNo = companyRegistrationNo;
+    if (companyAddress !== undefined) user.companyAddress = companyAddress;
+    if (companyCity !== undefined) user.companyCity = companyCity;
+    if (companyState !== undefined) user.companyState = companyState;
+    if (companyPincode !== undefined) user.companyPincode = companyPincode;
+    if (companyCountry !== undefined) user.companyCountry = companyCountry || 'India';
+    if (gstNumber !== undefined) user.gstNumber = gstNumber;
+    if (panNumber !== undefined) user.panNumber = panNumber;
+    if (companyType !== undefined) user.companyType = companyType;
+    if (website !== undefined) user.website = website;
+    if (yearEstablished !== undefined) user.yearEstablished = yearEstablished ? parseInt(yearEstablished) : null;
+    if (businessDescription !== undefined) user.businessDescription = businessDescription;
+    if (contactPerson !== undefined) user.contactPerson = contactPerson;
+    if (contactPhone !== undefined) user.contactPhone = contactPhone;
+    if (contactEmail !== undefined) user.contactEmail = contactEmail;
+    if (latitude !== undefined) user.latitude = latitude;
+    if (longitude !== undefined) user.longitude = longitude;
+
+    if (latitude && longitude) {
+      user.location = {
+        type: 'Point',
+        coordinates: [parseFloat(longitude), parseFloat(latitude)],
+      };
+    }
+
+    // ✅ PASSWORD CHANGE — CRITICAL
+    if (password && password.trim().length > 0) {
+      if (password.length < 6) {
+        return res.status(400).json({ msg: 'Password must be at least 6 characters' });
+      }
+      user.password = password;   // ← Hook will hash
+      console.log(`🔑 Password change for: ${user.email}`);
+    }
+
+    // ✅ save() triggers pre-save hook → password gets hashed
+    await user.save();
+
+    console.log(`✅ Profile saved: ${user.email}${password ? ' (password changed)' : ''}`);
+
+    const updated = await User.findById(user._id).select('-password');
+    res.json(updated);
+  } catch (err) {
+    console.error('❌ Profile update error:', err);
+    res.status(500).json({ msg: err.message });
+  }
+});
+
+// ============================================================
+// ✅ GET /api/auth/profile
+// 🔧 FIXED: reads from AdminProfile collection
+// ============================================================
+router.get('/profile', authMiddleware, async (req, res) => {
+  try {
+    if (isFixedAdmin(req)) {
+      const profile = await getAdminProfile();
+      return res.json(formatAdminProfile(profile));
+    }
+
+    const user = await User.findById(req.user.id).select('-password');
+    if (!user) return res.status(404).json({ msg: 'User not found' });
     res.json(user);
   } catch (err) {
+    console.error('❌ /profile error:', err);
     res.status(500).json({ msg: err.message });
   }
 });

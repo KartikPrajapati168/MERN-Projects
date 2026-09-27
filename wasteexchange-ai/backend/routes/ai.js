@@ -3,7 +3,8 @@ const express = require('express');
 const router = express.Router();
 const Listing = require('../models/Listing');
 const Requirement = require('../models/Requirement');
-const auth = require('../middleware/auth');
+const User = require('../models/User');   // ✅ TOP pe move kiya
+const { authMiddleware: auth } = require('../middleware/auth');
 const { materialClassifier, recommendationEngine } = require('../services/aiService');
 
 /**
@@ -17,10 +18,17 @@ router.post('/recommend', auth, async (req, res) => {
     if (!user) return res.status(404).json({ msg: 'User not found' });
     const role = user.role;
 
-    // ✅ FIXED: Include both active and pending
-    const allListings = await Listing.find({ 
-      status: { $in: ['active', 'pending'] } 
+    // ✅ FIXED: Exclude listings whose bidding has ENDED
+    const now = new Date();
+    const allListings = await Listing.find({
+      status: { $in: ['active', 'pending'] },
+      $or: [
+        { biddingEnabled: { $ne: true } },   // no bidding
+        { biddingEndsAt: null },              // no end date
+        { biddingEndsAt: { $gt: now } },      // bidding still running
+      ],
     });
+
     const allRequirements = await Requirement.find({ status: 'open' });
 
     console.log(`🤖 AI Match: role=${role} | listings=${allListings.length} | requirements=${allRequirements.length}`);
@@ -136,12 +144,18 @@ router.post('/similar-listings/:id', auth, async (req, res) => {
     const listing = await Listing.findById(req.params.id);
     if (!listing) return res.status(404).json({ msg: 'Listing not found' });
 
+    // ✅ Also filter ended bidings here
+    const now = new Date();
     const allListings = await Listing.find({ 
       status: 'active',
-      _id: { $ne: listing._id }
+      _id: { $ne: listing._id },
+      $or: [
+        { biddingEnabled: { $ne: true } },
+        { biddingEndsAt: null },
+        { biddingEndsAt: { $gt: now } },
+      ],
     });
 
-    // Same material ke saath TF-IDF similarity
     const results = recommendationEngine.recommend(
       { 
         material: listing.material,
@@ -160,9 +174,7 @@ router.post('/similar-listings/:id', auth, async (req, res) => {
   }
 });
 
-const User = require('../models/User');
 module.exports = router;
-
 
 
 
