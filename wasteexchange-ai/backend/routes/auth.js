@@ -200,6 +200,68 @@ router.post('/login', async (req, res) => {
 });
 
 // ============================================================
+// @route   POST /api/auth/admin-login
+// @desc    Admin-only login
+// ============================================================
+router.post('/admin-login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+      return res.status(400).json({
+        success: false,
+        msg: 'Please provide admin email and password'
+      });
+    }
+
+    // Admin email must match the configured admin email
+    if (email.trim().toLowerCase() !== FIXED_ADMIN_EMAIL.toLowerCase()) {
+      return res.status(401).json({
+        success: false,
+        msg: 'Invalid admin credentials.'
+      });
+    }
+
+    // Admin password must match configured admin password
+    if (password !== FIXED_ADMIN_PASSWORD) {
+      return res.status(401).json({
+        success: false,
+        msg: 'Invalid admin credentials.'
+      });
+    }
+
+    // Get/create admin profile
+    const adminProfile = await getAdminProfile();
+
+    // Create admin token
+    const token = jwt.sign(
+      {
+        id: FIXED_ADMIN_ID,
+        role: 'admin',
+        email: FIXED_ADMIN_EMAIL,
+        name: FIXED_ADMIN_NAME
+      },
+      process.env.JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+
+    return res.json({
+      success: true,
+      token,
+      user: formatAdminProfile(adminProfile)
+    });
+
+  } catch (err) {
+    console.error('❌ Admin login error:', err);
+
+    res.status(500).json({
+      success: false,
+      msg: 'Server error during admin login'
+    });
+  }
+});
+
+// ============================================================
 // @route   GET /api/auth/me
 // ============================================================
 router.get('/me', authMiddleware, async (req, res) => {

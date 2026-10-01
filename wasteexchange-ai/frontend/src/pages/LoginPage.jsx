@@ -18,17 +18,34 @@ const LoginPage = () => {
   // Check if already logged in and redirect accordingly
   useEffect(() => {
     const token = localStorage.getItem('token');
-    const user = JSON.parse(localStorage.getItem('currentUser'));
+    const savedUser = localStorage.getItem('currentUser');
 
-    if (token && user) {
-      // Already logged in – redirect based on status
-      if (user.isCompanyRegistered && user.isCompanyVerified) {
-        const dashboardPath = user.role === 'generator' ? '/generator' : '/buyer';
-        navigate(dashboardPath);
-      } else if (user.isCompanyRegistered && !user.isCompanyVerified) {
-        navigate('/waiting');
-      } else {
-        navigate('/register-company');
+    if (token && savedUser) {
+      try {
+        const user = JSON.parse(savedUser);
+
+        if (user.role === 'admin') {
+          navigate('/admin-login', { replace: true });
+          return;
+        }
+
+        if (user.isCompanyRegistered && user.isCompanyVerified) {
+          const dashboardPath =
+            user.role === 'generator' ? '/generator' : '/buyer';
+
+          navigate(dashboardPath);
+        } else if (
+          user.isCompanyRegistered &&
+          !user.isCompanyVerified
+        ) {
+          navigate('/waiting');
+        } else {
+          navigate('/register-company');
+        }
+
+      } catch (error) {
+        console.error('Invalid stored user data');
+        localStorage.removeItem('currentUser');
       }
     }
   }, [navigate]);
@@ -66,18 +83,26 @@ const LoginPage = () => {
       const { role, isCompanyVerified, isCompanyRegistered } = res.data.user;
 
       // ✅ ROLE-BASED REDIRECT (correct priority)
-      if (role === 'admin') {
-        navigate('/admin', { replace: true });
-      } else if (role === 'generator') {
-        if (isCompanyVerified) navigate('/generator', { replace: true });
-        else if (isCompanyRegistered) navigate('/waiting', { replace: true });
-        else navigate('/register-company', { replace: true });
+      if (role === 'generator') {
+        if (isCompanyVerified) {
+          navigate('/generator', { replace: true });
+        } else if (isCompanyRegistered) {
+          navigate('/waiting', { replace: true });
+        } else {
+          navigate('/register-company', { replace: true });
+        }
+
       } else if (role === 'buyer') {
-        if (isCompanyVerified) navigate('/buyer', { replace: true });
-        else if (isCompanyRegistered) navigate('/waiting', { replace: true });
-        else navigate('/register-company', { replace: true });
+        if (isCompanyVerified) {
+          navigate('/buyer', { replace: true });
+        } else if (isCompanyRegistered) {
+          navigate('/waiting', { replace: true });
+        } else {
+          navigate('/register-company', { replace: true });
+        }
+
       } else {
-        setError('Unknown user role');
+        setError('Admin accounts must use the Admin Login page.');
         setLoading(false);
       }
     } catch (err) {
@@ -193,7 +218,40 @@ const LoginPage = () => {
           </form>
 
           <div className="login-footer">
-            Don't have an account? <Link to="/signup" className="signup-link">Sign Up</Link>
+            Don't have an account?{' '}
+            <Link to="/signup" className="signup-link">
+              Sign Up
+            </Link>
+          </div>
+
+          <div
+            style={{
+              marginTop: '1.2rem',
+              paddingTop: '1.2rem',
+              borderTop: '1px solid rgba(255,255,255,0.1)',
+              textAlign: 'center'
+            }}
+          >
+            <span
+              style={{
+                color: 'rgba(255,255,255,0.45)',
+                fontSize: '0.85rem'
+              }}
+            >
+              Are you an administrator?{' '}
+            </span>
+
+            <Link
+              to="/admin-login"
+              style={{
+                color: '#a78bfa',
+                fontSize: '0.85rem',
+                textDecoration: 'none',
+                fontWeight: '600'
+              }}
+            >
+              Login as Admin
+            </Link>
           </div>
         </div>
       </div>

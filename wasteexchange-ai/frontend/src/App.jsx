@@ -10,6 +10,7 @@ import AdminDashboard from './pages/AdminDashboard';
 import BuyerDashboard from './pages/BuyerDashboard';
 import GeneratorDashboard from './pages/GeneratorDashboard';
 import './App.css';
+import AdminLoginPage from './pages/AdminLoginPage';
 
 function App() {
   return (
@@ -23,6 +24,7 @@ function App() {
       <Route path="/admin" element={<AdminDashboard />} />
       <Route path="/buyer" element={<BuyerDashboard />} />
       <Route path="/generator" element={<GeneratorDashboard />} />
+      <Route path="/admin-login" element={<AdminLoginPage />} />
       <Route path="*" element={<Navigate to="/" />} />
     </Routes>
   );

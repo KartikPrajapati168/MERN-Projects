@@ -28,15 +28,13 @@ const authMiddleware = (req, res, next) => {
       req.user.id = req.user._id;
     }
 
-    console.log('🔓 Auth OK:', {
-      id: req.user.id,
-      userId: req.userId,
-      role: req.user.role,
-    });
+    // 🔇 Removed success log — was spamming terminal on every API call
+    // (Frontend polls every 15-30s and hits ~7 endpoints → 7 logs each time)
 
     next();
   } catch (err) {
-    console.error('❌ Auth middleware error:', err.message);
+    // ✅ Only log on FAILURE so debugging invalid tokens is still possible
+    console.error('❌ Auth FAILED:', err.message);
     return res.status(401).json({
       success: false,
       msg: 'Token is not valid',

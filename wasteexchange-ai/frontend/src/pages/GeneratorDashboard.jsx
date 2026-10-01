@@ -51,6 +51,7 @@ const GeneratorDashboard = () => {
   const [activePage, setActivePage] = useState('dashboard');
   const [loading, setLoading] = useState(true);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const currentUserId = String(user?._id || user?.id || '');
 
   const [listings, setListings] = useState([]);
   const [requirements, setRequirements] = useState([]);
@@ -59,13 +60,16 @@ const GeneratorDashboard = () => {
   const [bidListings, setBidListings] = useState([]);
   const [bidsTab, setBidsTab] = useState('active');
 
-  const [clientsTab, setClientsTab] = useState('ai');
+  const [clientsTab, setClientsTab] = useState('all');
   const [reviewRequirement, setReviewRequirement] = useState(null);
+  const [reqStatusFilter, setReqStatusFilter] = useState('all');
 
-  // ✅ Messages state (two-pane)
   const [selectedConversation, setSelectedConversation] = useState(null);
   const [newMsgText, setNewMsgText] = useState('');
   const chatEndRef = useRef(null);
+
+  const [offerQuantity, setOfferQuantity] = useState('');
+  const [offerPrice, setOfferPrice] = useState('');
 
   const [searchTerm, setSearchTerm] = useState('');
   const [filterMaterial, setFilterMaterial] = useState('');
@@ -75,8 +79,7 @@ const GeneratorDashboard = () => {
   const [filterMinQty, setFilterMinQty] = useState('');
   const [filterMaxQty, setFilterMaxQty] = useState('');
 
-  const [currentPage, setCurrentPage] = useState(1);
-  const itemsPerPage = 5;
+  const [isSendingOffer, setIsSendingOffer] = useState(false);
 
   const chartRef = useRef(null);
   const chartInstanceRef = useRef(null);
@@ -117,16 +120,20 @@ const GeneratorDashboard = () => {
   const [withdrawMethod, setWithdrawMethod] = useState('upi');
   const [withdrawUPI, setWithdrawUPI] = useState('');
   const [withdrawBank, setWithdrawBank] = useState({
-    accountHolder: '',
-    accountNumber: '',
-    ifscCode: '',
-    bankName: ''
+    accountHolder: '', accountNumber: '', ifscCode: '', bankName: ''
   });
   const [withdrawError, setWithdrawError] = useState('');
   const [withdrawLoading, setWithdrawLoading] = useState(false);
 
   const materialChartRef = useRef(null);
   const materialChartInstance = useRef(null);
+
+  const [dismissedRequirements, setDismissedRequirements] = useState([]);
+
+  const handleDismissRequirement = (reqId) => {
+    setDismissedRequirements(prev => [...prev, String(reqId)]);
+    showSuccess('Requirement hidden from your list', 'Rejected');
+  };
 
   const { showAlert, showSuccess, showError, showConfirm, showDanger } = useDialog();
 
@@ -140,14 +147,12 @@ const GeneratorDashboard = () => {
 
     const currentUser = JSON.parse(localStorage.getItem('currentUser') || '{}');
 
-    // 🚫 ADMIN goes to /admin
     if (currentUser.role === 'admin') {
       setLoading(false);
       navigate('/admin', { replace: true });
       return;
     }
 
-    // 🚫 Wrong role
     if (currentUser.role !== 'generator') {
       setLoading(false);
       navigate('/login', { replace: true });
@@ -160,7 +165,6 @@ const GeneratorDashboard = () => {
       return;
     }
 
-    // ✅ All good
     setUser(currentUser);
     if (currentUser.profilePhoto) setProfilePhoto(currentUser.profilePhoto);
     setProfileForm({ ...currentUser, password: '' });
@@ -175,34 +179,153 @@ const GeneratorDashboard = () => {
         API.get('/requirements'),
         API.get('/deals/user'),
         API.get('/messages/user'),
-        API.get('/wallet/withdrawals')
+        API.get('/wallet/withdrawals'),
+        API.get('/listings/bids-received')
       ]);
 
       if (results[0].status === 'fulfilled') setListings(results[0].value.data || []);
       else setListings([]);
 
-      if (results[1].status === 'fulfilled') setRequirements(results[1].value.data || []);  // ✅ All requirements
-      else setRequirements([]);
+      let reqsData = [];
+      if (results[1].status === 'fulfilled') {
+        reqsData = results[1].value.data || [];
+      }
 
-      if (results[2].status === 'fulfilled') setDeals(results[2].value.data || []);
-      else setDeals([]);
+      let dealsData = [];
+      if (results[2].status === 'fulfilled') {
+        dealsData = results[2].value.data || [];
+      }
+      setDeals(dealsData);
 
       if (results[3].status === 'fulfilled') setMessages(results[3].value.data || []);
       else setMessages([]);
 
-      // ✅ NEW
       if (results[4].status === 'fulfilled') setWithdrawals(results[4].value.data || []);
       else setWithdrawals([]);
 
-      await loadBids();
+      let receivedBids = [];
+      if (results[5].status === 'fulfilled') {
+        receivedBids = results[5].value.data || [];
+        setBidListings(receivedBids);
+      } else {
+        setBidListings([]);
+      }
+
+      // ✅ Extract requirement IDs from buyer requests
+      const requestedReqIds = new Set();
+      receivedBids.forEach(listing => {
+        (listing.requests || []).forEach(req => {
+          if (req.requirementId) requestedReqIds.add(String(req.requirementId));
+        });
+      });
+
+      // ✅ FILTER: Only show requirements that buyers have explicitly requested
+      const relevantReqs = reqsData.filter(r => requestedReqIds.has(String(r._id)));
+
+      const cid = String(user?._id || user?.id || '');
+      const myActiveDeals = dealsData.filter(d =>
+        String(d.generatorId?._id || d.generatorId || '') === cid &&
+        ['offered', 'requested', 'accepted', 'paid'].includes(d.status)
+      );
+
+      const existingReqIds = new Set(relevantReqs.map(r => String(r._id)));
+      const mergedReqs = [...relevantReqs];
+
+      myActiveDeals.forEach(d => {
+        const reqId = String(d.requirementId?._id || d.requirementId);
+        if (!reqId || reqId === 'undefined') return;
+        if (existingReqIds.has(reqId)) return;
+
+        mergedReqs.push({
+          _id: reqId,
+          material: d.material,
+          materialSubtype: d.materialSubtype || '',
+          minQty: d.quantity,
+          maxQty: d.quantity,
+          maxPrice: d.pricePerUnit,
+          location: d.location || '',
+          buyerName: d.buyerName,
+          buyerId: d.buyerId,
+          status: 'open',
+          createdAt: d.createdAt,
+          _fromDeal: true,
+          _dealId: d._id
+        });
+        existingReqIds.add(reqId);
+      });
+
+      setRequirements(mergedReqs);
     } catch (err) { console.error('❌ fetchData error:', err); }
     finally { setLoading(false); }
   };
 
+  useEffect(() => {
+    if (!user) return;
+    const interval = setInterval(() => {
+      fetchData();
+    }, 30000);
+    return () => clearInterval(interval);
+  }, [user]);
+
+  // While on Bids page: poll every 20s to auto-award when timer ends
+  useEffect(() => {
+    if (!user || activePage !== 'bids') return;
+    loadBids();
+    const t = setInterval(() => { loadBids(); }, 20000);
+    return () => clearInterval(t);
+  }, [user, activePage]);
+
   const loadBids = async () => {
     try {
       const res = await API.get('/listings/bids-received');
-      setBidListings(res.data || []);
+      let data = res.data || [];
+      setBidListings(data);
+
+      // Expired live auctions (time over, not yet sold/closed)
+      const expired = data.filter(l =>
+        l.biddingEndsAt &&
+        new Date(l.biddingEndsAt).getTime() <= Date.now() &&
+        l.status !== 'sold' &&
+        l.status !== 'closed'
+      );
+
+      for (const l of expired) {
+        const openBids = (l.bids || []).filter(b => b.status !== 'rejected' && b.status !== 'accepted');
+        const hasBids = openBids.length > 0 || (l.bids || []).some(b => b.status === 'accepted');
+
+        if (openBids.length > 0) {
+          // Auto-award to highest bidder → creates deal / sends offer
+          try {
+            await API.post(`/listings/${l._id}/bids/auto-award`);
+          } catch (_) {
+            // Fallback: accept top bid manually
+            const top = [...openBids].sort((a, b) => (b.amount || 0) - (a.amount || 0))[0];
+            if (top?._id) {
+              try {
+                await API.post(`/listings/${l._id}/bids/${top._id}/accept`);
+              } catch (__) { /* ignore */ }
+            }
+          }
+        } else if (!hasBids && l.biddingEnabled) {
+          // No bids → close bidding, restore stock for direct requests
+          try {
+            await API.put(`/listings/${l._id}`, { biddingEnabled: false });
+          } catch (_) {
+            try { await API.patch(`/listings/${l._id}`, { biddingEnabled: false }); } catch (__) { /* ignore */ }
+          }
+        }
+      }
+
+      if (expired.length > 0) {
+        const [bidsRes, listRes, dealsRes] = await Promise.allSettled([
+          API.get('/listings/bids-received'),
+          API.get('/listings/user'),
+          API.get('/deals/user'),
+        ]);
+        if (bidsRes.status === 'fulfilled') setBidListings(bidsRes.value.data || []);
+        if (listRes.status === 'fulfilled') setListings(listRes.value.data || []);
+        if (dealsRes.status === 'fulfilled') setDeals(dealsRes.value.data || []);
+      }
     } catch (err) { setBidListings([]); }
   };
 
@@ -214,17 +337,111 @@ const GeneratorDashboard = () => {
   };
 
   const handleAcceptBid = async (listingId, bidId) => {
+    if (!listingId || !bidId) {
+      showError('Bid not found. Refresh and try again.');
+      return;
+    }
+
     const ok = await showConfirm(
-      'This bid will be accepted and a deal will be created with the winning buyer.',
-      { title: 'Accept Bid?', confirmText: 'Accept Bid' }
+      'This will send an OFFER to the buyer (not auto-accepted). Buyer must accept & pay — same as when auction timer ends.',
+      { title: 'Send Offer to Bidder?', confirmText: 'Send Offer' }
     );
     if (!ok) return;
+
+    const listing = bidListings.find(l => String(l._id) === String(listingId));
+    const bid = (listing?.bids || []).find(b =>
+      String(b._id || b.id) === String(bidId)
+    );
+
+    const buyerId = bid
+      ? (bid.buyerId?._id || bid.buyerId || bid.buyer?._id || bid.buyer)
+      : null;
+    const requirementId = bid
+      ? (bid.requirementId?._id || bid.requirementId || null)
+      : null;
+    const price = bid ? Number(bid.amount || bid.price || 0) : 0;
+    const qty = listing ? Number(listing.quantity || 0) : 0;
+
+    const forceDealOffered = async (dealId) => {
+      if (!dealId) return;
+      try {
+        await API.put(`/deals/${dealId}`, { status: 'offered' });
+      } catch (_) {
+        try { await API.patch(`/deals/${dealId}`, { status: 'offered' }); } catch (__) { /* ignore */ }
+      }
+    };
+
     try {
-      const res = await API.post(`/listings/${listingId}/bids/${bidId}/accept`);
-      showSuccess('Bid accepted! Deal created with the buyer.');
-      if (res?.data?.deal) setDeals(prev => [...prev, res.data.deal]);
+      let offerCreated = false;
+
+      // 1) Preferred: create deal as OFFER (buyer Deals tab shows Offer)
+      if (buyerId && price > 0 && qty > 0) {
+        try {
+          await API.post('/deals/offer', {
+            listingId,
+            buyerId,
+            requirementId,
+            quantity: qty,
+            pricePerUnit: price
+          });
+          offerCreated = true;
+        } catch (e) {
+          console.warn('deals/offer failed', e?.response?.data?.msg || e?.message);
+        }
+      }
+
+      // 2) Mark bid as won (backend may also create a deal as accepted)
+      let acceptDeal = null;
+      try {
+        const res = await API.post(
+          `/listings/${listingId}/bids/${bidId}/accept`,
+          { asOffer: true, createAsOffer: true }
+        );
+        acceptDeal = res?.data?.deal || null;
+      } catch (acceptErr) {
+        // If offer already created, accept failure is ok for bid marking
+        if (!offerCreated) throw acceptErr;
+      }
+
+      // 3) Force any accepted deal for this listing+buyer → offered
+      if (acceptDeal?._id && acceptDeal.status === 'accepted') {
+        await forceDealOffered(acceptDeal._id);
+      }
+
+      try {
+        const dealsRes = await API.get('/deals/user');
+        const allDeals = dealsRes.data || [];
+        const toFix = allDeals.filter(d => {
+          const lid = String(d.listingId?._id || d.listingId || '');
+          const bid = String(d.buyerId?._id || d.buyerId || '');
+          return lid === String(listingId) &&
+            (!buyerId || bid === String(buyerId)) &&
+            d.status === 'accepted';
+        });
+        for (const d of toFix) {
+          await forceDealOffered(d._id);
+        }
+        const refreshed = await API.get('/deals/user');
+        setDeals(refreshed.data || []);
+      } catch (_) { /* ignore */ }
+
+      // Close bidding on this listing so it leaves Active tab
+      try {
+        await API.put(`/listings/${listingId}`, { biddingEnabled: false, status: 'closed' });
+      } catch (_) {
+        try {
+          await API.patch(`/listings/${listingId}`, { biddingEnabled: false, status: 'closed' });
+        } catch (__) { /* ignore */ }
+      }
+
+      showSuccess('Offer sent to buyer! Listing moved to Completed — buyer will see Offer under Deals.');
+      setBidsTab('completed');
       await loadBids();
       await fetchListingsOnly();
+      try {
+        const dealsRes = await API.get('/deals/user');
+        setDeals(dealsRes.data || []);
+      } catch (_) { /* ignore */ }
     } catch (err) {
       showError(err.response?.data?.msg || err.message);
     }
@@ -245,25 +462,43 @@ const GeneratorDashboard = () => {
     }
   };
 
-  // ✅ Handle buyer contact (find matching listings)
   const handleContactBuyer = async (requirement) => {
     if (requirement.status === 'fulfilled') {
       showError('This requirement is already fulfilled.', 'Cannot Send Offer');
       return;
     }
 
-    const currentUserId = String(user?._id || user?.id || '');
+    // ✅ FIX: Ignore 'requested' status. Only block if Generator already sent an offer or deal is accepted/paid.
+    const existingOffer = deals.find(d => {
+      if (!d.requirementId || !requirement._id) return false;
+      const reqId = String(d.requirementId?._id || d.requirementId);
+      const genId = String(d.generatorId?._id || d.generatorId || '');
+      const isSameReq = reqId === String(requirement._id);
+      const isSameGen = genId === currentUserId;
+      // ✅ Sirf in statuses par block karo (offered, accepted, paid). 'requested' ko mat block karo.
+      const isActive = ['offered', 'accepted', 'paid'].includes(d.status);
 
-    const existingOffer = deals.find(d =>
-      String(d.requirementId) === String(requirement._id) &&
-      String(d.generatorId) === currentUserId &&
-      (d.status === 'offered' || d.status === 'requested' || d.status === 'accepted' || d.status === 'completed')
-    );
+      return isSameReq && isSameGen && isActive;
+    });
+
     if (existingOffer) {
-      showAlert(
-        `You already sent an offer for this requirement.\n\nCurrent Status: ${existingOffer.status.toUpperCase()}\n\nWait for the buyer's response.`,
-        { title: 'Offer Already Sent', type: 'warning' }
-      );
+      let title = 'Offer Already Sent';
+      let msg = '';
+      let type = 'warning';
+
+      if (existingOffer.status === 'offered') {
+        msg = 'You already sent an offer. Waiting for buyer response.\n\nCheck "Deals" tab for updates.';
+      } else if (existingOffer.status === 'accepted') {
+        msg = 'Buyer accepted your offer. Payment pending.\n\nCheck "Deals" tab.';
+        type = 'info';
+      } else if (existingOffer.status === 'paid') {
+        msg = '✅ Buyer has PAID. Go to "Deals" tab to mark as delivered.';
+        title = 'Payment Received';
+        type = 'success';
+      }
+
+      showAlert(msg, { title, type });
+      setTimeout(() => setActivePage('deals'), 500);
       return;
     }
 
@@ -286,22 +521,47 @@ const GeneratorDashboard = () => {
     setOfferRequirement(requirement);
     setMatchingListings(matched);
     setSelectedListingForOffer(null);
+
+    const defaultQty = Math.min(
+      Number(requirement.maxQty) || 0,
+      Number(matched[0]?.quantity) || 0
+    );
+    setOfferQuantity(String(defaultQty || ''));
+    setOfferPrice(String(matched[0]?.price || requirement.maxPrice || ''));
   };
 
-  // ✅ Confirm send offer - uses /deals/offer endpoint
   const confirmSendOffer = async () => {
-    if (!offerRequirement || !selectedListingForOffer) return;
-    try {
-      console.log('📤 Sending offer:', {
-        listingId: selectedListingForOffer._id,
-        buyerId: offerRequirement.buyerId,
-        buyerName: offerRequirement.buyerName
-      });
+    if (!offerRequirement || !selectedListingForOffer || isSendingOffer) return;
 
+    const qty = Number(offerQuantity);
+    const price = Number(offerPrice);
+
+    if (!qty || qty <= 0) {
+      showError('Enter a valid quantity', 'Invalid Input');
+      return;
+    }
+    if (qty > selectedListingForOffer.quantity) {
+      showError(`Quantity exceeds your listing stock (${selectedListingForOffer.quantity} kg)`, 'Not Enough Stock');
+      return;
+    }
+    if (!price || price <= 0) {
+      showError('Enter a valid price', 'Invalid Input');
+      return;
+    }
+    if (price > offerRequirement.maxPrice) {
+      showError(`Price exceeds buyer's max (₹${offerRequirement.maxPrice}/kg)`, 'Price Too High');
+      return;
+    }
+
+    setIsSendingOffer(true);
+
+    try {
       await API.post('/deals/offer', {
         listingId: selectedListingForOffer._id,
         buyerId: offerRequirement.buyerId,
-        requirementId: offerRequirement._id  // ✅ NEW - link requirement
+        requirementId: offerRequirement._id,
+        quantity: qty,
+        pricePerUnit: price
       });
 
       const [dealsRes, listingsRes] = await Promise.all([
@@ -314,27 +574,35 @@ const GeneratorDashboard = () => {
       try {
         await API.post('/messages', {
           receiverName: offerRequirement.buyerName,
-          content: `Hi ${offerRequirement.buyerName}, I saw your requirement for ${offerRequirement.material} (${offerRequirement.minQty}-${offerRequirement.maxQty}kg). I have a matching listing (${selectedListingForOffer.quantity}kg @ ₹${selectedListingForOffer.price}/kg). Let's connect!`
+          content: `Hi ${offerRequirement.buyerName}, I saw your requirement for ${offerRequirement.material}. I can offer ${qty}kg at ₹${price}/kg. Total: ₹${(qty * price).toLocaleString('en-IN')}. Let's connect!`
         });
       } catch (e) { /* ignore */ }
 
+      const buyerName = offerRequirement.buyerName;
       setOfferRequirement(null);
       setMatchingListings([]);
       setSelectedListingForOffer(null);
-      showSuccess(`Offer sent to ${offerRequirement.buyerName}!\n\nThey will see it in their Deals tab.`, 'Offer Sent');
+      setOfferQuantity('');
+      setOfferPrice('');
+      showSuccess(`Offer sent to ${buyerName}!\n\n${qty} kg @ ₹${price}/kg`, 'Offer Sent');
     } catch (err) {
-      alert('❌ Failed to send offer: ' + (err.response?.data?.msg || err.message));
+      showError(err.response?.data?.msg || err.message, 'Failed to Send Offer');
+    } finally {
+      setIsSendingOffer(false);
     }
   };
 
   // ----- Stats -----
   const totalListings = listings.length;
   const activeListings = listings.filter(l => l.status === 'active').length;
-  const pendingBidsCount = bidListings.reduce((sum, l) => sum + (l.bids?.filter(b => b.status !== 'accepted' && b.status !== 'rejected').length || 0), 0);
-  const currentUserId = String(user?._id || user?.id || '');
+  const pendingBidsCount = bidListings.reduce((sum, l) => {
+    const live = l.biddingEnabled && l.status !== 'sold' && l.status !== 'closed' &&
+      (!l.biddingEndsAt || new Date(l.biddingEndsAt).getTime() > Date.now());
+    if (!live) return sum;
+    return sum + (l.bids?.filter(b => b.status !== 'accepted' && b.status !== 'rejected').length || 0);
+  }, 0);
   const completedDeals = deals.filter(d => String(d.generatorId) === currentUserId && d.status === 'completed').length;
 
-  // ✅ Dynamic monthly listings from actual data
   const monthlyListings = (() => {
     const counts = Array(12).fill(0);
     listings.forEach(l => {
@@ -345,7 +613,6 @@ const GeneratorDashboard = () => {
     return counts;
   })();
 
-  // ✅ Material distribution from actual data
   const materialDistribution = (() => {
     const dist = {};
     listings.forEach(l => {
@@ -379,30 +646,17 @@ const GeneratorDashboard = () => {
         responsive: true,
         maintainAspectRatio: false,
         plugins: {
-          legend: {
-            labels: { color: isLight ? '#475569' : '#9ca3af', font: { size: 12 } }
-          },
-          tooltip: {
-            callbacks: {
-              label: (c) => `${c.raw} listing(s)`
-            }
-          }
+          legend: { labels: { color: isLight ? '#475569' : '#9ca3af', font: { size: 12 } } },
+          tooltip: { callbacks: { label: (c) => `${c.raw} listing(s)` } }
         },
         scales: {
           y: {
             beginAtZero: true,
             suggestedMax: Math.max(5, ...monthlyListings) + 1,
-            ticks: {
-              stepSize: 1,
-              color: isLight ? '#64748b' : '#9ca3af',
-              font: { size: 11 }
-            },
+            ticks: { stepSize: 1, color: isLight ? '#64748b' : '#9ca3af', font: { size: 11 } },
             grid: { color: isLight ? 'rgba(0,0,0,0.05)' : 'rgba(255,255,255,0.05)' }
           },
-          x: {
-            ticks: { color: isLight ? '#64748b' : '#9ca3af', font: { size: 11 } },
-            grid: { display: false }
-          },
+          x: { ticks: { color: isLight ? '#64748b' : '#9ca3af', font: { size: 11 } }, grid: { display: false } },
         },
       },
     });
@@ -421,16 +675,9 @@ const GeneratorDashboard = () => {
     const data = Object.values(materialDistribution);
 
     const COLORS = {
-      'Plastic': '#6366f1',
-      'Metal': '#f59e0b',
-      'Paper': '#22c55e',
-      'Textile': '#ec4899',
-      'Wood': '#8b5cf6',
-      'Glass': '#06b6d4',
-      'Rubber': '#ef4444',
-      'E-waste': '#84cc16',
-      'Organic': '#10b981',
-      'Other': '#94a3b8'
+      'Plastic': '#6366f1', 'Metal': '#f59e0b', 'Paper': '#22c55e', 'Textile': '#ec4899',
+      'Wood': '#8b5cf6', 'Glass': '#06b6d4', 'Rubber': '#ef4444', 'E-waste': '#84cc16',
+      'Organic': '#10b981', 'Other': '#94a3b8'
     };
 
     const bgColors = labels.map(l => COLORS[l] || '#94a3b8');
@@ -453,18 +700,9 @@ const GeneratorDashboard = () => {
         plugins: {
           legend: {
             position: 'right',
-            labels: {
-              color: '#d1d5db',
-              padding: 14,
-              usePointStyle: true,
-              font: { size: 11 }
-            }
+            labels: { color: '#d1d5db', padding: 14, usePointStyle: true, font: { size: 11 } }
           },
-          tooltip: {
-            callbacks: {
-              label: (c) => `${c.label}: ${c.raw} listing(s)`
-            }
-          }
+          tooltip: { callbacks: { label: (c) => `${c.label}: ${c.raw} listing(s)` } }
         }
       }
     });
@@ -486,92 +724,132 @@ const GeneratorDashboard = () => {
     };
   }, [activePage, loading, initChart, initMaterialChart]);
 
-  // Filters
+  const getRequirementStatusForGenerator = useCallback((req) => {
+    const cid = String(user?._id || user?.id || '');
+
+    const myDeals = deals.filter(d =>
+      String(d.requirementId?._id || d.requirementId) === String(req._id) &&
+      String(d.generatorId?._id || d.generatorId || '') === cid
+    );
+
+    const myDeal = myDeals.sort((a, b) =>
+      new Date(b.createdAt || 0) - new Date(a.createdAt || 0)
+    )[0];
+
+    if (!myDeal) {
+      return { key: 'active', label: 'New' };
+    }
+
+    if (myDeal.status === 'completed') {
+      return { key: 'active', label: 'New' };
+    }
+    if (myDeal.status === 'paid') {
+      return { key: 'paid', label: 'Paid' };
+    }
+    if (myDeal.status === 'accepted') {
+      return { key: 'paid', label: 'Paid' };
+    }
+    if (myDeal.status === 'offered') {
+      return { key: 'offered', label: 'Offer Sent' };
+    }
+    if (myDeal.status === 'rejected') {
+      return { key: 'rejected', label: 'Rejected' };
+    }
+
+    return { key: 'active', label: 'New' };
+  }, [user, deals]);
+
   const filteredRequirements = requirements
     .filter(r => {
-      const matchSearch = r.material.toLowerCase().includes(searchTerm.toLowerCase());
-      const matchMat = filterMaterial ? r.material.toLowerCase().includes(filterMaterial.toLowerCase()) : true;
-      const matchLoc = filterLocation ? r.location.toLowerCase().includes(filterLocation.toLowerCase()) : true;
+      const matchSearch = (r.material || '').toLowerCase().includes(searchTerm.toLowerCase());
+      const matchMat = filterMaterial ? (r.material || '').toLowerCase().includes(filterMaterial.toLowerCase()) : true;
+      const matchLoc = filterLocation ? (r.location || '').toLowerCase().includes(filterLocation.toLowerCase()) : true;
       const matchMinPrice = filterMinPrice ? r.maxPrice >= Number(filterMinPrice) : true;
       const matchMaxPrice = filterMaxPrice ? r.maxPrice <= Number(filterMaxPrice) : true;
       const matchMinQty = filterMinQty ? r.maxQty >= Number(filterMinQty) : true;
       const matchMaxQty = filterMaxQty ? r.minQty <= Number(filterMaxQty) : true;
-      return matchSearch && matchMat && matchLoc && matchMinPrice && matchMaxPrice && matchMinQty && matchMaxQty;
+
+      const statusInfo = getRequirementStatusForGenerator(r);
+      const statusMatch = reqStatusFilter === 'all' ? true : statusInfo.key === reqStatusFilter;
+
+      return matchSearch && matchMat && matchLoc && matchMinPrice && matchMaxPrice && matchMinQty && matchMaxQty && statusMatch;
     })
-    // ✅ Latest first (sort by createdAt DESC)
     .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
-  const totalPages = Math.ceil(filteredRequirements.length / itemsPerPage);
-  const paginatedRequirements = filteredRequirements.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage);
 
-  // // AI Matches
-  // const calculateMatch = (listing, req) => {
-  //   const text1 = (listing.material + ' ' + (listing.description || '')).toLowerCase();
-  //   const text2 = req.material.toLowerCase();
-  //   const words1 = text1.split(/\s+/);
-  //   const words2 = text2.split(/\s+/);
-  //   const common = words1.filter(w => words2.includes(w) && w.length > 2);
-  //   const textSim = Math.min(100, (common.length / Math.max(1, words2.length)) * 100);
-  //   const qty = listing.quantity;
-  //   let qtyScore = 0;
-  //   if (qty >= req.minQty && qty <= req.maxQty) qtyScore = 100;
-  //   else if (qty > req.maxQty) qtyScore = Math.max(0, 100 - ((qty - req.maxQty) / req.maxQty) * 50);
-  //   else qtyScore = Math.max(0, 100 - ((req.minQty - qty) / req.minQty) * 50);
-  //   const priceScore = listing.price <= req.maxPrice ? 100 : Math.max(0, 100 - ((listing.price - req.maxPrice) / req.maxPrice) * 100);
-  //   const locScore = listing.location.toLowerCase() === req.location.toLowerCase() ? 100 : 50;
-  //   const condScore = listing.description?.toLowerCase().includes('good') ? 100 : 70;
-  //   const weights = { text: 0.30, qty: 0.25, price: 0.20, loc: 0.15, cond: 0.10 };
-  //   return Math.round((textSim * weights.text) + (qtyScore * weights.qty) + (priceScore * weights.price) + (locScore * weights.loc) + (condScore * weights.cond));
-  // };
+  const statusCounts = requirements.reduce((acc, r) => {
+    const { key } = getRequirementStatusForGenerator(r);
+    acc[key] = (acc[key] || 0) + 1;
+    acc.all = (acc.all || 0) + 1;
+    return acc;
+  }, { all: 0, active: 0, offered: 0, paid: 0, fulfilled: 0, rejected: 0 });
 
-  // const getAIMatches = () => {
-  //   const currentUserId = String(user?._id || user?.id || '');
-  //   const myListings = listings.filter(l => String(l.generatorId) === currentUserId && (l.status === 'active' || l.status === 'pending'));
-  //   const openReqs = requirements.filter(r => r.status === 'open');
-  //   const results = [];
-  //   myListings.forEach(listing => {
-  //     openReqs.forEach(req => {
-  //       const score = calculateMatch(listing, req);
-  //       if (score > 30) results.push({ ...req, listingId: listing._id, listingMaterial: listing.material, matchScore: score });
-  //     });
-  //   });
-  //   return results.sort((a, b) => b.matchScore - a.matchScore);
-  // };
-  // const aiMatches = getAIMatches();
-
-  // ✅ Fetch AI matches from backend
   const fetchAIRecClients = async () => {
     try {
       setAiRecLoading(true);
-      console.log('🤖 Fetching AI recommended clients for generator');
+
+      const bidsRes = await API.get('/listings/bids-received');
+      const freshBidListings = bidsRes.data || [];
+      setBidListings(freshBidListings);
+
+      const requestedReqIds = new Set();
+      freshBidListings.forEach(listing => {
+        (listing.requests || []).forEach(req => {
+          if (req.requirementId) requestedReqIds.add(String(req.requirementId));
+        });
+      });
+
       const res = await API.post('/ai/recommend', { role: 'generator' });
       let aiData = res.data || [];
 
-      // ✅ Merge fulfilled requirements from my past deals (so they show up too)
+      const relevantAiMatches = aiData.filter(item => requestedReqIds.has(String(item._id)));
+
       const cid = String(user?._id || user?.id || '');
-      const myCompletedDeals = deals.filter(d =>
-        String(d.generatorId) === cid &&
-        (d.status === 'completed' || d.status === 'accepted' || d.status === 'offered' || d.status === 'requested')
+      const myActiveDeals = deals.filter(d =>
+        String(d.generatorId?._id || d.generatorId || '') === cid &&
+        ['offered', 'requested', 'accepted', 'paid'].includes(d.status)
       );
 
-      // Add fulfilled requirements that aren't already in AI matches
-      const existingIds = new Set(aiData.map(a => String(a._id)));
-      const extraFulfilled = [];
+      const existingIds = new Set(relevantAiMatches.map(a => String(a._id)));
+      const extraRelevant = [];
 
-      myCompletedDeals.forEach(d => {
-        const req = requirements.find(r => String(r._id) === String(d.requirementId));
-        if (req && !existingIds.has(String(req._id))) {
-          extraFulfilled.push({
+      myActiveDeals.forEach(d => {
+        const reqId = String(d.requirementId?._id || d.requirementId);
+        if (!reqId || reqId === 'undefined') return;
+        if (existingIds.has(reqId)) return;
+
+        const req = requirements.find(r => String(r._id) === reqId);
+
+        if (req) {
+          extraRelevant.push({
             ...req,
             matchScore: 100,
             textSimilarity: 100,
             ruleScore: 100,
             aiExplanation: [`Past interaction: Deal ${d.status}`]
           });
+        } else {
+          extraRelevant.push({
+            _id: reqId,
+            material: d.material,
+            materialSubtype: d.materialSubtype || '',
+            minQty: d.quantity,
+            maxQty: d.quantity,
+            maxPrice: d.pricePerUnit,
+            location: d.location || '',
+            buyerName: d.buyerName,
+            buyerId: d.buyerId,
+            status: 'open',
+            createdAt: d.createdAt,
+            matchScore: 100,
+            textSimilarity: 100,
+            ruleScore: 100,
+            aiExplanation: [`Past interaction: Deal ${d.status}`]
+          });
         }
+        existingIds.add(reqId);
       });
 
-      setAiRecommendedClients([...aiData, ...extraFulfilled]);
-      console.log('✅ AI matches + past fulfilled:', aiData.length + extraFulfilled.length);
+      setAiRecommendedClients([...relevantAiMatches, ...extraRelevant]);
     } catch (err) {
       console.error('❌ AI recommend failed:', err.response?.data?.msg || err.message);
       setAiRecommendedClients([]);
@@ -580,14 +858,12 @@ const GeneratorDashboard = () => {
     }
   };
 
-  // ✅ Trigger when tab changes
   useEffect(() => {
-    if (activePage === 'findClients' && clientsTab === 'ai') {
+    if (activePage === 'findRequirements' && clientsTab === 'ai') {
       fetchAIRecClients();
     }
   }, [activePage, clientsTab]);
 
-  // Image upload
   const handleImageSelect = (fileList) => {
     const files = Array.from(fileList || []);
     if (!files.length) return;
@@ -699,7 +975,6 @@ const GeneratorDashboard = () => {
         `Listing added successfully!\n\nAI classified as: ${res.data.aiCategory || 'Other'}\nConfidence: ${res.data.aiConfidence || 0}%`,
         'Listing Created'
       );
-      setCurrentPage(1);
       setActivePage('listings');
     } catch (err) {
       showError(err.response?.data?.msg || err.message);
@@ -764,33 +1039,22 @@ const GeneratorDashboard = () => {
 
       const confirmMsg =
         `Material: ${deal.material} (${deal.quantity}kg)\n\n` +
-        `Buyer pays: ₹${deal.buyerTotalPayment.toLocaleString('en-IN')}\n` +
-        `  (Material: ₹${deal.totalAmount.toLocaleString('en-IN')} + 2% buyer fee)\n\n` +
-        `You will receive: ₹${deal.generatorPayout.toLocaleString('en-IN')}\n` +
-        `  (After 2% platform fee: ₹${deal.generatorCommission})\n\n` +
-        `This will be credited to your wallet immediately.`;
+        `Buyer will pay: ₹${(deal.buyerTotalPayment || deal.totalAmount).toLocaleString('en-IN')}\n` +
+        `You will receive: ₹${(deal.generatorPayout || deal.totalAmount).toLocaleString('en-IN')}\n\n` +
+        `After you accept, the buyer will need to complete the payment.`;
 
       const ok = await showConfirm(confirmMsg, {
         title: 'Accept This Request?',
-        confirmText: 'Accept & Credit Wallet'
+        confirmText: 'Accept Request'
       });
       if (!ok) return;
 
       const res = await API.put(`/deals/${dealId}/accept`);
       setDeals(deals.map(d => d._id === dealId ? res.data : d));
 
-      try {
-        const meRes = await API.get('/auth/me');
-        if (meRes.data?.user) {
-          const updatedUser = { ...user, walletBalance: meRes.data.user.walletBalance };
-          localStorage.setItem('currentUser', JSON.stringify(updatedUser));
-          setUser(updatedUser);
-        }
-      } catch (e) { console.warn('Wallet refresh failed:', e.message); }
-
       showSuccess(
-        `Deal accepted!\n\n₹${deal.generatorPayout.toLocaleString('en-IN')} credited to your wallet.`,
-        'Deal Accepted'
+        `Request accepted!\n\nBuyer will now complete the payment.\nOnce paid, you can mark it as delivered.`,
+        'Request Accepted'
       );
       await fetchData();
     } catch (err) {
@@ -804,39 +1068,70 @@ const GeneratorDashboard = () => {
   };
 
   const completeDeal = async (dealId) => {
-    const ok = await showConfirm(
-      `Confirm only after the material has been handed over to the buyer.\n\nThis will close the deal permanently.`,
-      { title: 'Mark as Delivered?', confirmText: 'Yes, Mark Delivered' }
-    );
+    const deal = deals.find(d => d._id === dealId);
+    if (!deal) return;
+
+    const isPaid = deal.status === 'paid';
+    const confirmMsg = isPaid
+      ? `Confirm only after the material has been handed over to the buyer.\n\nThis will close the deal permanently.`
+      : `⚠️ Buyer has NOT paid yet.\n\nAre you sure the buyer has paid and you want to mark this as delivered?\n\nThis will close the deal permanently.`;
+
+    const ok = await showConfirm(confirmMsg, {
+      title: 'Mark as Delivered?',
+      confirmText: 'Yes, Mark Delivered'
+    });
     if (!ok) return;
     try {
       const res = await API.put(`/deals/${dealId}/complete`);
       setDeals(deals.map(d => d._id === dealId ? res.data : d));
       showSuccess('Deal marked as delivered! Material handover complete.', 'Completed');
+      await fetchData();
     } catch (err) {
       showError(err.response?.data?.msg || err.message);
     }
   };
 
   const handleAutoAward = async (listing) => {
-    const sortedBids = [...(listing.bids || [])].sort((a, b) => b.amount - a.amount);
-    const topBid = sortedBids[0];
+    const sortedBids = [...(listing.bids || [])].sort((a, b) => (b.amount || 0) - (a.amount || 0));
+    const topBid = sortedBids.find(b => b.status !== 'rejected') || sortedBids[0];
+    if (!topBid) {
+      showError('No bids to award.');
+      return;
+    }
+
+    // Already awarded? Don't allow again
+    if ((listing.bids || []).some(b => b.status === 'accepted' || b.status === 'won')) {
+      showAlert('This listing is already awarded to a bidder.', { title: 'Already Awarded', type: 'info' });
+      setBidsTab('completed');
+      return;
+    }
 
     const ok = await showConfirm(
-      `Winner: ${topBid?.buyerName}\nAmount: ₹${topBid?.amount}/kg\nTotal: ₹${(listing.quantity * topBid?.amount).toLocaleString('en-IN')}\n\nThis will create a deal and notify the buyer.`,
-      { title: `Award "${listing.material}"?`, confirmText: 'Award to Winner' }
+      `Winner: ${topBid?.buyerName}\nAmount: ₹${topBid?.amount}/kg\nTotal: ₹${(listing.quantity * topBid?.amount).toLocaleString('en-IN')}\n\nThis will send an OFFER to the buyer (they must Accept & Pay).`,
+      { title: `Award "${listing.material}"?`, confirmText: 'Send Offer to Winner' }
     );
     if (!ok) return;
 
+    const bidId = topBid._id || topBid.id;
     try {
-      const res = await API.post(`/listings/${listing._id}/bids/auto-award`);
-      showSuccess(res.data.msg, '🏆 Awarded');
-      await loadBids();
-      await fetchListingsOnly();
-      const dealsRes = await API.get('/deals/user');
-      setDeals(dealsRes.data);
+      // Reuse same flow as manual Accept → offer first
+      await handleAcceptBid(listing._id, bidId);
     } catch (err) {
-      showError(err.response?.data?.msg || err.message);
+      // Fallback: auto-award API then force offered
+      try {
+        const res = await API.post(`/listings/${listing._id}/bids/auto-award`);
+        try {
+          await API.put(`/listings/${listing._id}`, { biddingEnabled: false, status: 'closed' });
+        } catch (_) { /* ignore */ }
+        showSuccess(res.data?.msg || 'Awarded', '🏆 Awarded');
+        setBidsTab('completed');
+        await loadBids();
+        await fetchListingsOnly();
+        const dealsRes = await API.get('/deals/user');
+        setDeals(dealsRes.data || []);
+      } catch (err2) {
+        showError(err2.response?.data?.msg || err2.message);
+      }
     }
   };
 
@@ -872,7 +1167,6 @@ const GeneratorDashboard = () => {
     finally { setAddMoneyLoading(false); }
   };
 
-  // ✅ Withdrawal handler
   const handleWithdraw = async () => {
     setWithdrawError('');
 
@@ -924,7 +1218,6 @@ const GeneratorDashboard = () => {
       setUser(updatedUser);
       setWithdrawals([res.data.withdrawal, ...withdrawals]);
 
-      // Reset
       setWithdrawAmount('');
       setWithdrawUPI('');
       setWithdrawBank({ accountHolder: '', accountNumber: '', ifscCode: '', bankName: '' });
@@ -973,13 +1266,11 @@ const GeneratorDashboard = () => {
 
   const handleLogout = () => { localStorage.clear(); navigate('/login'); };
 
-  // ✅ Conversation partners (exclude own name)
   const conversationPartners = Array.from(new Set(
     messages.map(m => m.senderName === user?.name ? m.receiverName : m.senderName)
       .filter(name => name && name !== user?.name)
   ));
 
-  // ✅ Send chat message
   const sendChatMessage = async () => {
     if (!newMsgText.trim() || !selectedConversation) return;
     const content = newMsgText;
@@ -998,31 +1289,39 @@ const GeneratorDashboard = () => {
   const navItems = [
     { id: 'dashboard', icon: 'tachometer-alt', label: 'Dashboard' },
     { id: 'listings', icon: 'box-open', label: 'My Listings' },
-    { id: 'stock', icon: 'cubes', label: 'Total Stock' },        // ✅ NEW
-    { id: 'findClients', icon: 'search', label: 'Find Clients' },
+    { id: 'stock', icon: 'cubes', label: 'Total Stock' },
+    { id: 'findRequirements', icon: 'search', label: 'Find Requirements' },
     { id: 'bids', icon: 'gavel', label: 'Bids Received', badge: pendingBidsCount },
     { id: 'messages', icon: 'comments', label: 'Messages' },
     { id: 'deals', icon: 'handshake', label: 'Deals' },
-    { id: 'withdraw', icon: 'money-bill-wave', label: 'Withdraw' },   // ✅ NEW
+    { id: 'withdraw', icon: 'money-bill-wave', label: 'Withdraw' },
     { id: 'profile', icon: 'user', label: 'Profile' },
   ];
 
   const getStatusBadgeClass = (status) => {
     const map = {
-      // Listing statuses
       active: 'status-active',
       closed: 'status-closed',
-      sold: 'status-closed',       // legacy
-      // Deal statuses
-      offered: 'status-pending',    // amber
-      requested: 'status-pending',  // amber
-      accepted: 'status-active',    // green
-      completed: 'status-closed',   // grey (done)
+      sold: 'status-closed',
+      requested: 'status-requested',
+      offered: 'status-pending',
+      accepted: 'status-accepted',
+      paid: 'status-paid',
+      completed: 'status-completed',
       rejected: 'status-closed',
-      // Legacy
       pending: 'status-pending'
     };
     return map[status] || 'status-pending';
+  };
+
+  const getDealStatusLabel = (d) => {
+    if (d.status === 'completed') return '✅ Completed';
+    if (d.status === 'paid') return '💰 Paid';
+    if (d.status === 'accepted') return '✅ Accepted (Unpaid)';
+    if (d.status === 'offered') return '📤 Offered';
+    if (d.status === 'requested') return '📩 Requested';
+    if (d.status === 'rejected') return '❌ Rejected';
+    return d.status;
   };
 
   if (loading) {
@@ -1080,7 +1379,6 @@ const GeneratorDashboard = () => {
               </div>
             </div>
 
-            {/* ✅ Material Distribution Chart */}
             <div className="gp-card" style={{ marginBottom: 24 }}>
               <div className="gp-section-title">
                 <span><i className="fas fa-chart-pie me-2" style={{ color: '#a78bfa' }}></i>Material Distribution</span>
@@ -1104,8 +1402,8 @@ const GeneratorDashboard = () => {
               <button className="gp-action-card" onClick={() => setActivePage('create')}>
                 <i className="fas fa-plus-circle"></i><span>Create Listing</span>
               </button>
-              <button className="gp-action-card" onClick={() => setActivePage('findClients')}>
-                <i className="fas fa-search"></i><span>Find Clients</span>
+              <button className="gp-action-card" onClick={() => setActivePage('findRequirements')}>
+                <i className="fas fa-search"></i><span>Find Requirements</span>
               </button>
               <button className="gp-action-card" onClick={() => setActivePage('bids')}>
                 <i className="fas fa-gavel"></i><span>Bids Received</span>
@@ -1177,23 +1475,22 @@ const GeneratorDashboard = () => {
 
                       <td>
                         {(() => {
-                          // ✅ Compute proper status
                           const isBiddingLive = l.biddingEnabled && l.biddingEndsAt && new Date(l.biddingEndsAt).getTime() > Date.now();
                           const isAssigned = l.status === 'closed' || l.status === 'sold';
-
-                          // Find any accepted/completed deal on this listing
                           const listingDeals = deals.filter(d => String(d.listingId) === String(l._id));
                           const hasCompleted = listingDeals.some(d => d.status === 'completed');
+                          const hasPaid = listingDeals.some(d => d.status === 'paid' || d.status === 'accepted');
                           const hasAccepted = listingDeals.some(d => d.status === 'accepted');
                           const hasOffered = listingDeals.some(d => d.status === 'offered' || d.status === 'requested');
 
                           if (hasCompleted) {
-                            return <span className="badge status-closed" style={{ background: 'rgba(16,185,129,0.15)', color: '#10b981' }}>
-                              <i className="fas fa-check-circle me-1"></i>Completed
-                            </span>;
+                            return <span className="badge status-completed"><i className="fas fa-check-circle me-1"></i>Completed</span>;
+                          }
+                          if (hasPaid) {
+                            return <span className="badge status-paid"><i className="fas fa-rupee-sign me-1"></i>Paid</span>;
                           }
                           if (hasAccepted) {
-                            return <span className="badge status-active">Accepted</span>;
+                            return <span className="badge status-accepted">Accepted</span>;
                           }
                           if (hasOffered) {
                             return <span className="badge status-pending">Offered</span>;
@@ -1230,33 +1527,42 @@ const GeneratorDashboard = () => {
           </div>
         );
 
-      case 'findClients': {
-        const allCount = filteredRequirements.length;
+      case 'findRequirements': {
         const aiCount = aiRecommendedClients.length;
+        const allCount = requirements.length;
 
         return (
           <div>
             <div className="gp-page-header">
-              <h2>Find Clients</h2>
-              <button
-                className="gp-btn-primary"
-                onClick={() => { fetchAIRecClients(); }}
-                style={{ fontSize: '0.8rem', padding: '8px 16px' }}
-              >
-                <i className="fas fa-sync"></i> Refresh AI
-              </button>
+              <h2>Find Requirements</h2>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button
+                  className="gp-btn-primary"
+                  onClick={() => { fetchData(); }}
+                  style={{ fontSize: '0.8rem', padding: '8px 16px' }}
+                >
+                  <i className="fas fa-sync"></i> Refresh
+                </button>
+                <button
+                  className="gp-btn-primary"
+                  onClick={() => { fetchAIRecClients(); }}
+                  style={{ fontSize: '0.8rem', padding: '8px 16px' }}
+                >
+                  <i className="fas fa-robot"></i> Refresh AI
+                </button>
+              </div>
             </div>
 
             <div className="gp-pill-tabs">
+              <button onClick={() => setClientsTab('all')} className={`gp-pill-tab ${clientsTab === 'all' ? 'active' : ''}`}>
+                <span className="gp-pill-dot" style={{ background: '#6366f1' }} />
+                All Requirements
+                <span className="gp-pill-count">{allCount}</span>
+              </button>
               <button onClick={() => setClientsTab('ai')} className={`gp-pill-tab ${clientsTab === 'ai' ? 'active' : ''}`}>
                 <span className="gp-pill-dot" style={{ background: '#8b5cf6' }} />
                 AI Recommended
                 <span className="gp-pill-count">{aiCount}</span>
-              </button>
-              <button onClick={() => setClientsTab('all')} className={`gp-pill-tab ${clientsTab === 'all' ? 'active' : ''}`}>
-                <span className="gp-pill-dot" style={{ background: '#6366f1' }} />
-                All Clients
-                <span className="gp-pill-count">{allCount}</span>
               </button>
             </div>
 
@@ -1264,7 +1570,7 @@ const GeneratorDashboard = () => {
               <div className="gp-section-block">
                 <h3 style={{ fontSize: '1rem' }}>
                   <i className="fas fa-robot me-2" style={{ color: '#8b5cf6' }}></i>
-                  AI Recommended Clients
+                  AI Recommended Buyers
                 </h3>
                 <p style={{ fontSize: '0.78rem', color: '#9ca3af', marginTop: -6, marginBottom: 14, lineHeight: 1.5 }}>
                   <i className="fas fa-info-circle me-1"></i>
@@ -1290,188 +1596,54 @@ const GeneratorDashboard = () => {
                       .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0))
                       .map((item, idx) => {
                         const bc = idx === 0 ? '#22c55e' : idx === 1 ? '#fbbf24' : idx === 2 ? '#60a5fa' : '#8b5cf6';
+                        const statusInfo = getRequirementStatusForGenerator(item);
                         return (
-                          <div
-                            key={`${item._id}-${idx}`}
-                            style={{
-                              background: 'rgba(255,255,255,0.03)',
-                              border: '1px solid rgba(255,255,255,0.06)',
-                              borderLeft: `4px solid ${bc}`,
-                              borderRadius: 12,
-                              padding: '16px 18px',
+                          <div key={`${item._id}-${idx}`} className="gp-ai-card-wrapper" style={{ borderLeft: `4px solid ${bc}` }}>
+                            <div style={{
+                              background: 'rgba(139,92,246,0.08)',
+                              padding: '10px 14px',
+                              borderRadius: 10,
+                              marginBottom: 10,
                               display: 'flex',
                               justifyContent: 'space-between',
                               alignItems: 'center',
                               flexWrap: 'wrap',
-                              gap: 12,
-                              position: 'relative'
-                            }}
-                          >
-                            <div style={{ flex: 1, minWidth: 240 }}>
-                              {/* Row 1: Match badge + Material + Subtype + Buyer */}
-                              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
+                              gap: 8
+                            }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                                 <span style={{
-                                  background: bc,
-                                  color: 'white',
-                                  padding: '3px 10px',
-                                  borderRadius: 20,
-                                  fontSize: '0.68rem',
-                                  fontWeight: 700,
-                                  letterSpacing: '0.2px'
+                                  background: bc, color: 'white', padding: '3px 10px', borderRadius: 20,
+                                  fontSize: '0.68rem', fontWeight: 700, letterSpacing: '0.2px'
                                 }}>
                                   #{idx + 1} · {item.matchScore}% Match
                                 </span>
-                                <strong style={{ color: 'white', fontSize: '0.95rem', fontWeight: 700 }}>
-                                  {item.material}
-                                </strong>
-                                {item.materialSubtype && (
-                                  <span style={{
-                                    background: 'rgba(99,102,241,0.2)',
-                                    color: '#a78bfa',
-                                    padding: '2px 8px',
-                                    borderRadius: 8,
-                                    fontSize: '0.7rem',
-                                    fontWeight: 500
-                                  }}>
-                                    {item.materialSubtype}
-                                  </span>
-                                )}
-                                {item.buyerName && (
-                                  <span style={{
-                                    background: 'rgba(34,197,94,0.15)',
-                                    color: '#22c55e',
-                                    padding: '2px 10px',
-                                    borderRadius: 20,
-                                    fontSize: '0.7rem',
-                                    fontWeight: 600,
-                                    display: 'inline-flex',
-                                    alignItems: 'center',
-                                    gap: 4
-                                  }}>
-                                    <i className="fas fa-user" style={{ fontSize: '0.6rem' }}></i>
-                                    {item.buyerName}
-                                  </span>
-                                )}
+                                <span style={{ fontSize: '0.75rem', color: '#9ca3af' }}>
+                                  Text Sim: <strong style={{ color: '#22c55e' }}>{item.textSimilarity}%</strong>
+                                  {' · '}
+                                  Rule: <strong style={{ color: '#60a5fa' }}>{item.ruleScore}%</strong>
+                                </span>
                               </div>
-
-                              {/* Row 2: Material details */}
-                              <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', fontSize: '0.82rem', color: '#9ca3af', marginBottom: 8 }}>
-                                <span>📉 {item.minQty}-{item.maxQty} kg</span>
-                                <span>💰 Max ₹{item.maxPrice}/kg</span>
-                                <span>📍 {item.location?.substring(0, 45)}{item.location?.length > 45 ? '...' : ''}</span>
-                              </div>
-
-                              {/* Row 3: Score breakdown */}
-                              <div style={{
-                                background: 'rgba(255,255,255,0.02)',
-                                padding: '8px 12px',
-                                borderRadius: 8,
-                                fontSize: '0.72rem',
-                                display: 'flex',
-                                gap: 16,
-                                flexWrap: 'wrap',
-                                alignItems: 'center'
-                              }}>
-                                <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                                  <span style={{ color: '#6b7280' }}>Text Sim:</span>
-                                  <strong style={{ color: '#22c55e', fontSize: '0.75rem' }}>{item.textSimilarity}%</strong>
-                                </div>
-                                <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                                  <span style={{ color: '#6b7280' }}>Rule-based:</span>
-                                  <strong style={{ color: '#60a5fa', fontSize: '0.75rem' }}>{item.ruleScore}%</strong>
-                                </div>
-                                {item.aiExplanation && item.aiExplanation[0] && (
-                                  <div style={{ color: '#a78bfa', fontStyle: 'italic', display: 'flex', alignItems: 'center', gap: 4 }}>
-                                    <i className="fas fa-lightbulb"></i>
-                                    <span style={{ fontSize: '0.72rem' }}>{item.aiExplanation[0]}</span>
-                                  </div>
-                                )}
-                              </div>
+                              {item.aiExplanation?.[0] && (
+                                <span style={{ color: '#a78bfa', fontStyle: 'italic', fontSize: '0.72rem' }}>
+                                  <i className="fas fa-lightbulb"></i> {item.aiExplanation[0]}
+                                </span>
+                              )}
                             </div>
 
                             {(() => {
-                              const cid = String(user?._id || user?.id || '');
-                              const itemRelatedDeals = deals.filter(d => String(d.requirementId) === String(item._id));
-                              const myDeal = itemRelatedDeals.find(d => String(d.generatorId) === cid);
-                              const itemAlreadyOffered = myDeal && (myDeal.status === 'offered' || myDeal.status === 'requested');
-                              const itemAccepted = myDeal && myDeal.status === 'accepted';
-                              const itemFulfilled = (myDeal && myDeal.status === 'completed') || item.status === 'fulfilled';
-
+                              const statusInfo = getRequirementStatusForGenerator(item);
                               return (
-                                <div style={{ display: 'flex', gap: 8, flexShrink: 0, alignItems: 'center' }}>
-                                  <button
-                                    onClick={() => setReviewRequirement(item)}
-                                    style={{
-                                      padding: '8px 14px',
-                                      borderRadius: 8,
-                                      border: '1px solid rgba(139,92,246,0.3)',
-                                      background: 'rgba(139,92,246,0.1)',
-                                      color: '#a78bfa',
-                                      cursor: 'pointer',
-                                      fontSize: '0.78rem',
-                                      fontWeight: 600,
-                                      display: 'inline-flex',
-                                      alignItems: 'center',
-                                      gap: 6
-                                    }}
-                                  >
-                                    <i className="fas fa-eye"></i> Review
-                                  </button>
-
-                                  {itemFulfilled ? (
-                                    <span style={{
-                                      padding: '8px 14px', borderRadius: 8,
-                                      background: 'rgba(16,185,129,0.15)', color: '#10b981',
-                                      fontSize: '0.72rem', fontWeight: 700,
-                                      display: 'inline-flex', alignItems: 'center', gap: 6,
-                                      textTransform: 'uppercase',
-                                      border: '1px solid rgba(16,185,129,0.3)',
-                                      letterSpacing: '0.3px'
-                                    }}>
-                                      <i className="fas fa-check-circle"></i> Fulfilled
-                                    </span>
-                                  ) : itemAccepted ? (
-                                    <span style={{
-                                      padding: '8px 14px', borderRadius: 8,
-                                      background: 'rgba(96,165,250,0.15)', color: '#60a5fa',
-                                      fontSize: '0.72rem', fontWeight: 700,
-                                      display: 'inline-flex', alignItems: 'center', gap: 6,
-                                      textTransform: 'uppercase',
-                                      letterSpacing: '0.3px'
-                                    }}>
-                                      <i className="fas fa-hourglass-half"></i> In Progress
-                                    </span>
-                                  ) : itemAlreadyOffered ? (
-                                    <span style={{
-                                      padding: '8px 14px', borderRadius: 8,
-                                      background: 'rgba(34,197,94,0.15)', color: '#22c55e',
-                                      fontSize: '0.72rem', fontWeight: 700,
-                                      display: 'inline-flex', alignItems: 'center', gap: 6,
-                                      textTransform: 'uppercase', letterSpacing: '0.3px'
-                                    }}>
-                                      <i className="fas fa-paper-plane"></i> Offer Sent
-                                    </span>
-                                  ) : (
-                                    <button
-                                      onClick={() => handleContactBuyer(item)}
-                                      style={{
-                                        padding: '8px 16px',
-                                        borderRadius: 8,
-                                        border: 'none',
-                                        background: 'linear-gradient(135deg, #22c55e, #16a34a)',
-                                        color: 'white',
-                                        cursor: 'pointer',
-                                        fontSize: '0.78rem',
-                                        fontWeight: 600,
-                                        display: 'inline-flex',
-                                        alignItems: 'center',
-                                        gap: 6
-                                      }}
-                                    >
-                                      <i className="fas fa-handshake"></i> Send Offer
-                                    </button>
-                                  )}
-                                </div>
+                                <RequirementCard
+                                  requirement={item}
+                                  viewMode="browse"
+                                  onContact={handleContactBuyer}
+                                  onReview={(req) => setReviewRequirement(req)}
+                                  onDelete={null}
+                                  onEdit={null}
+                                  isFulfilled={statusInfo.key === 'fulfilled'}
+                                  isInProgress={statusInfo.key === 'paid'}
+                                  alreadyOffered={statusInfo.key === 'offered'}
+                                />
                               );
                             })()}
                           </div>
@@ -1483,7 +1655,7 @@ const GeneratorDashboard = () => {
             ) : (
               <div>
                 <div className="gp-filters-grid">
-                  <input type="text" placeholder="Search by material..." value={searchTerm} onChange={(e) => { setSearchTerm(e.target.value); setCurrentPage(1); }} />
+                  <input type="text" placeholder="Search by material..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
                   <input type="text" placeholder="Material filter" value={filterMaterial} onChange={(e) => setFilterMaterial(e.target.value)} />
                   <input type="text" placeholder="Location" value={filterLocation} onChange={(e) => setFilterLocation(e.target.value)} />
                   <input type="number" placeholder="Min Price" value={filterMinPrice} onChange={(e) => setFilterMinPrice(e.target.value)} />
@@ -1492,36 +1664,98 @@ const GeneratorDashboard = () => {
                   <input type="number" placeholder="Max Qty" value={filterMaxQty} onChange={(e) => setFilterMaxQty(e.target.value)} />
                 </div>
 
+                <div className="gp-pill-tabs" style={{ marginBottom: 18 }}>
+                  <button
+                    onClick={() => setReqStatusFilter('all')}
+                    className={`gp-pill-tab ${reqStatusFilter === 'all' ? 'active' : ''}`}
+                  >
+                    <span className="gp-pill-dot" style={{ background: '#6366f1' }} />
+                    All
+                    <span className="gp-pill-count">{statusCounts.all || 0}</span>
+                  </button>
+
+                  <button
+                    onClick={() => setReqStatusFilter('directRequest')}
+                    className={`gp-pill-tab ${reqStatusFilter === 'directRequest' ? 'active' : ''}`}
+                  >
+                    <span className="gp-pill-dot" style={{ background: '#fbbf24' }} />
+                    📩 Requests Received
+                    <span className="gp-pill-count">{statusCounts.directRequest || 0}</span>
+                  </button>
+
+                  <button
+                    onClick={() => setReqStatusFilter('active')}
+                    className={`gp-pill-tab ${reqStatusFilter === 'active' ? 'active' : ''}`}
+                  >
+                    <span className="gp-pill-dot" style={{ background: '#22c55e' }} />
+                    Active / New
+                    <span className="gp-pill-count">{statusCounts.active || 0}</span>
+                  </button>
+
+                  <button
+                    onClick={() => setReqStatusFilter('offered')}
+                    className={`gp-pill-tab ${reqStatusFilter === 'offered' ? 'active' : ''}`}
+                  >
+                    <span className="gp-pill-dot" style={{ background: '#60a5fa' }} />
+                    Offer Sent
+                    <span className="gp-pill-count">{statusCounts.offered || 0}</span>
+                  </button>
+
+                  <button
+                    onClick={() => setReqStatusFilter('paid')}
+                    className={`gp-pill-tab ${reqStatusFilter === 'paid' ? 'active' : ''}`}
+                  >
+                    <span className="gp-pill-dot" style={{ background: '#10b981' }} />
+                    💰 Paid
+                    <span className="gp-pill-count">{statusCounts.paid || 0}</span>
+                  </button>
+
+                  <button
+                    onClick={() => setReqStatusFilter('progress')}
+                    className={`gp-pill-tab ${reqStatusFilter === 'progress' ? 'active' : ''}`}
+                  >
+                    <span className="gp-pill-dot" style={{ background: '#22d3ee' }} />
+                    In Progress
+                    <span className="gp-pill-count">{statusCounts.progress || 0}</span>
+                  </button>
+                  <button
+                    onClick={() => setReqStatusFilter('fulfilled')}
+                    className={`gp-pill-tab ${reqStatusFilter === 'fulfilled' ? 'active' : ''}`}
+                  >
+                    <span className="gp-pill-dot" style={{ background: '#a78bfa' }} />
+                    Fulfilled
+                    <span className="gp-pill-count">{statusCounts.fulfilled || 0}</span>
+                  </button>
+                  <button
+                    onClick={() => setReqStatusFilter('rejected')}
+                    className={`gp-pill-tab ${reqStatusFilter === 'rejected' ? 'active' : ''}`}
+                  >
+                    <span className="gp-pill-dot" style={{ background: '#9ca3af' }} />
+                    Rejected
+                    <span className="gp-pill-count">{statusCounts.rejected || 0}</span>
+                  </button>
+                </div>
+
                 <h3 style={{ marginTop: 8, marginBottom: 14, fontSize: '1rem' }}>
-                  All Buyer Requirements
+                  {reqStatusFilter === 'all' && 'All Buyer Requirements'}
+                  {reqStatusFilter === 'active' && 'Active Requirements (No offer sent yet)'}
+                  {reqStatusFilter === 'offered' && 'Offer Sent — Waiting for buyer response'}
+                  {reqStatusFilter === 'progress' && 'In Progress — Buyer accepted, deal ongoing'}
+                  {reqStatusFilter === 'fulfilled' && 'Fulfilled Requirements'}
+                  {reqStatusFilter === 'rejected' && 'Rejected Requirements'}
                   <span style={{ fontSize: '0.75rem', color: '#6b7280', fontWeight: 400, marginLeft: 8 }}>
-                    ({filteredRequirements.filter(r => r.status === 'open').length} open · {filteredRequirements.length} total)
+                    ({filteredRequirements.length} {filteredRequirements.length === 1 ? 'item' : 'items'})
                   </span>
                 </h3>
+
                 <div className="gp-requests-grid">
-                  {paginatedRequirements.length === 0 ? (
+                  {filteredRequirements.length === 0 ? (
                     <div className="gp-no-data-block">
                       <i className="fas fa-inbox fa-2x" style={{ color: '#4b5563', marginBottom: 10 }}></i>
-                      <p style={{ fontSize: '0.85rem' }}>No open requirements found.</p>
+                      <p style={{ fontSize: '0.85rem' }}>No requirements found in this category.</p>
                     </div>
-                  ) : paginatedRequirements.map(r => {
-                    const cid = String(user?._id || user?.id || '');
-                    const relatedDeals = deals.filter(d => String(d.requirementId) === String(r._id));
-
-                    const anyCompletedDeal = relatedDeals.some(d => d.status === 'completed');
-                    const requirementFulfilled = r.status === 'fulfilled' || anyCompletedDeal;
-
-                    const myActiveDeal = relatedDeals.find(d =>
-                      String(d.generatorId) === cid &&
-                      (d.status === 'accepted' || d.status === 'completed')
-                    );
-                    const isFulfilled = requirementFulfilled || myActiveDeal?.status === 'completed';
-                    const isInProgress = !isFulfilled && myActiveDeal?.status === 'accepted';
-
-                    const alreadyOffered = relatedDeals.some(d =>
-                      String(d.generatorId) === cid &&
-                      (d.status === 'offered' || d.status === 'requested')
-                    );
+                  ) : filteredRequirements.map(r => {
+                    const statusInfo = getRequirementStatusForGenerator(r);
 
                     return (
                       <RequirementCard
@@ -1532,159 +1766,97 @@ const GeneratorDashboard = () => {
                         onReview={(req) => setReviewRequirement(req)}
                         onDelete={null}
                         onEdit={null}
-                        isFulfilled={isFulfilled}
-                        isInProgress={isInProgress}
-                        alreadyOffered={alreadyOffered}
+                        isFulfilled={statusInfo.key === 'fulfilled'}
+                        isInProgress={statusInfo.key === 'paid'}
+                        alreadyOffered={statusInfo.key === 'offered'}
                       />
                     );
                   })}
                 </div>
-                {filteredRequirements.length > itemsPerPage && (
-                  <div className="gp-pagination">
-                    <button onClick={() => setCurrentPage(p => Math.max(1, p - 1))} disabled={currentPage === 1}>Previous</button>
-                    <span>Page {currentPage} of {totalPages}</span>
-                    <button onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))} disabled={currentPage === totalPages}>Next</button>
-                  </div>
-                )}
               </div>
             )}
-
-            {/* ✅ NEW: My Past Deals & Offers History — Ye Section Hai Jo Tu Chahta Tha */}
-            <div style={{ marginTop: 32 }}>
-              <h3 style={{ marginTop: 0, marginBottom: 14, fontSize: '1rem', color: '#a78bfa' }}>
-                <i className="fas fa-history me-2"></i>
-                My Buyer Interactions ({deals.filter(d => String(d.generatorId) === currentUserId).length})
-              </h3>
-
-              {deals.filter(d => String(d.generatorId) === currentUserId).length === 0 ? (
-                <div className="gp-no-data-block" style={{ padding: '24px 0' }}>
-                  <i className="fas fa-inbox fa-2x" style={{ color: '#4b5563', marginBottom: 8 }}></i>
-                  <p style={{ fontSize: '0.85rem' }}>No buyer interactions yet</p>
-                </div>
-              ) : (
-                <div className="gp-table">
-                  <table className="table">
-                    <thead>
-                      <tr>
-                        <th>Buyer</th>
-                        <th>Material</th>
-                        <th>Qty</th>
-                        <th>Price/kg</th>
-                        <th>Total</th>
-                        <th>Type</th>
-                        <th>Status</th>
-                        <th>Date</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {deals
-                        .filter(d => String(d.generatorId) === currentUserId)
-                        .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
-                        .map(d => (
-                          <tr key={d._id}>
-                            <td>
-                              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                                <div style={{
-                                  width: 28, height: 28, borderRadius: '50%',
-                                  background: 'linear-gradient(135deg, #22c55e, #16a34a)',
-                                  color: 'white', display: 'flex', alignItems: 'center',
-                                  justifyContent: 'center', fontSize: '0.72rem', fontWeight: 700
-                                }}>
-                                  {(d.buyerName || 'U').charAt(0).toUpperCase()}
-                                </div>
-                                <strong style={{ fontSize: '0.88rem' }}>{d.buyerName || 'Unknown'}</strong>
-                              </div>
-                            </td>
-                            <td style={{ fontSize: '0.88rem' }}>{d.material}</td>
-                            <td style={{ fontSize: '0.88rem' }}>{d.quantity} kg</td>
-                            <td style={{ fontSize: '0.88rem' }}>₹{d.pricePerUnit}/kg</td>
-                            <td style={{ color: '#22c55e', fontWeight: 600, fontSize: '0.88rem' }}>
-                              ₹{Number(d.totalAmount).toLocaleString('en-IN')}
-                            </td>
-                            <td>
-                              <span style={{
-                                background: d.initiatedBy === 'generator'
-                                  ? 'rgba(99,102,241,0.15)'
-                                  : 'rgba(251,191,36,0.15)',
-                                color: d.initiatedBy === 'generator' ? '#a78bfa' : '#fbbf24',
-                                padding: '3px 10px', borderRadius: 8,
-                                fontSize: '0.7rem', fontWeight: 600,
-                                display: 'inline-block',
-                                whiteSpace: 'nowrap'
-                              }}>
-                                {d.initiatedBy === 'generator' ? 'Offer Sent' : 'Request Received'}
-                              </span>
-                            </td>
-                            <td>
-                              <span className={`badge ${getStatusBadgeClass(d.status)}`} style={{ fontSize: '0.72rem' }}>
-                                {d.status === 'completed' ? '✅ Completed' :
-                                  d.status === 'accepted' ? 'Paid' :
-                                    d.status === 'rejected' ? 'Rejected' :
-                                      'Offered'}
-                              </span>
-                            </td>
-                            <td>
-                              <small style={{ color: '#9ca3af', fontSize: '0.75rem' }}>{formatDate(d.createdAt)}</small>
-                            </td>
-                          </tr>
-                        ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </div>
           </div>
         );
       }
 
       case 'stock': {
-        // ✅ Calculate aggregated stock
-        const stockStats = listings.reduce((acc, l) => {
-          const qty = Number(l.quantity) || 0;
-          acc.totalQty += qty;
-          acc.count++;
+        // Helper: get deal quantity (supports both quantity & requestedQuantity)
+        const getDealQty = (d) => Number(d.quantity || d.requestedQuantity || 0) || 0;
+        const getListingId = (d) => String(d.listingId?._id || d.listingId || '');
+        const getGenId = (d) => String(d.generatorId?._id || d.generatorId || '');
 
-          if (l.status === 'active') {
-            acc.activeQty += qty;
-            acc.activeCount++;
-          } else if (l.status === 'pending') {
-            acc.pendingQty += qty;
-            acc.pendingCount++;
-          } else if (l.status === 'sold' || l.status === 'closed') {
-            acc.soldQty += qty;
-            acc.soldCount++;
-          }
+        const myDeals = deals.filter(d => getGenId(d) === currentUserId);
 
-          // Total value (qty × price)
-          acc.totalValue += qty * (Number(l.price) || 0);
-
-          return acc;
-        }, { totalQty: 0, activeQty: 0, pendingQty: 0, soldQty: 0, count: 0, activeCount: 0, pendingCount: 0, soldCount: 0, totalValue: 0 });
-
-        // ✅ Offers sent breakdown
-        const offersSent = deals.filter(d => String(d.generatorId) === currentUserId && d.initiatedBy === 'generator');
-
-        // ✅ Per-listing stock table
+        // Per-listing: CAP sold + reserved so they never exceed listing quantity
+        // Available = free to sell now
+        // Reserved  = locked in requested/offered deals
+        // Sold      = accepted/paid/completed (capped to listing qty)
         const listingStock = listings.map(l => {
-          const relatedDeals = deals.filter(d => String(d.listingId) === String(l._id));
-          const soldDeals = relatedDeals.filter(d => d.status === 'completed' || d.status === 'accepted');
-          const pendingDeals = relatedDeals.filter(d => d.status === 'requested' || d.status === 'offered');
+          const relatedDeals = myDeals.filter(d => getListingId(d) === String(l._id));
+          const soldDeals = relatedDeals.filter(d => ['completed', 'paid', 'accepted'].includes(d.status));
+          const reservedDeals = relatedDeals.filter(d => ['requested', 'offered'].includes(d.status));
+
+          const totalQty = Number(l.quantity) || 0;
+          let soldQty = soldDeals.reduce((s, d) => s + getDealQty(d), 0);
+          let reservedQty = reservedDeals.reduce((s, d) => s + getDealQty(d), 0);
+
+          // Consistency: sold first, then reserved, never exceed totalQty
+          soldQty = Math.min(soldQty, totalQty);
+          reservedQty = Math.min(reservedQty, Math.max(0, totalQty - soldQty));
+          const available = Math.max(0, totalQty - soldQty - reservedQty);
 
           return {
             ...l,
-            soldQty: soldDeals.reduce((s, d) => s + (Number(d.quantity) || 0), 0),
-            pendingQty: pendingDeals.reduce((s, d) => s + (Number(d.quantity) || 0), 0),
+            soldQty,
+            pendingQty: reservedQty, // kept as pendingQty for table column
+            available,
             totalDeals: relatedDeals.length,
-            potentialValue: (Number(l.quantity) || 0) * (Number(l.price) || 0)
+            potentialValue: totalQty * (Number(l.price) || 0)
           };
         });
 
-        const stockColor = (status) => {
-          if (status === 'active') return '#22c55e';
-          if (status === 'pending') return '#fbbf24';
-          if (status === 'sold' || status === 'closed') return '#9ca3af';
-          return '#6366f1';
-        };
+        // Aggregate — always consistent: available + reserved + sold === totalQty
+        const stockStats = listingStock.reduce((acc, l) => {
+          const qty = Number(l.quantity) || 0;
+          acc.totalQty += qty;
+          acc.count++;
+          acc.soldQty += l.soldQty;
+          acc.pendingQty += l.pendingQty; // reserved
+          acc.activeQty += l.available;   // available to sell
+          acc.totalValue += qty * (Number(l.price) || 0);
+          if (l.status === 'active') acc.activeCount++;
+          else if (l.status === 'pending') acc.pendingCount++;
+          else if (l.status === 'sold' || l.status === 'closed') acc.soldCount++;
+          return acc;
+        }, { totalQty: 0, activeQty: 0, pendingQty: 0, soldQty: 0, count: 0, activeCount: 0, pendingCount: 0, soldCount: 0, totalValue: 0 });
+
+        // SVG pie helper
+        const pieSlices = (() => {
+          const parts = [
+            { label: 'Available', value: stockStats.activeQty, color: '#22c55e' },
+            { label: 'Reserved', value: stockStats.pendingQty, color: '#fbbf24' },
+            { label: 'Sold', value: stockStats.soldQty, color: '#a78bfa' },
+          ].filter(p => p.value > 0);
+          const total = parts.reduce((s, p) => s + p.value, 0) || 1;
+          let angle = -90;
+          return parts.map(p => {
+            const sweep = (p.value / total) * 360;
+            const start = angle;
+            angle += sweep;
+            const r = 60;
+            const c = 70;
+            const toRad = (a) => (a * Math.PI) / 180;
+            const x1 = c + r * Math.cos(toRad(start));
+            const y1 = c + r * Math.sin(toRad(start));
+            const x2 = c + r * Math.cos(toRad(start + sweep));
+            const y2 = c + r * Math.sin(toRad(start + sweep));
+            const large = sweep > 180 ? 1 : 0;
+            const d = sweep >= 359.9
+              ? `M ${c} ${c - r} A ${r} ${r} 0 1 1 ${c - 0.01} ${c - r} Z`
+              : `M ${c} ${c} L ${x1} ${y1} A ${r} ${r} 0 ${large} 1 ${x2} ${y2} Z`;
+            return { ...p, d, pct: ((p.value / total) * 100).toFixed(1) };
+          });
+        })();
 
         return (
           <div>
@@ -1692,169 +1864,59 @@ const GeneratorDashboard = () => {
               <h2>📦 Total Stock Overview</h2>
             </div>
 
-            {/* Top KPI Cards */}
             <div className="gp-kpi-grid">
-              <KpiCard
-                label="Total Stock"
-                value={`${stockStats.totalQty.toLocaleString('en-IN')} kg`}
-                color="#6366f1"
-                icon="cubes"
-              />
-              <KpiCard
-                label="Active (Unsold)"
-                value={`${stockStats.activeQty.toLocaleString('en-IN')} kg`}
-                color="#22c55e"
-                icon="check-circle"
-              />
-              <KpiCard
-                label="Pending"
-                value={`${stockStats.pendingQty.toLocaleString('en-IN')} kg`}
-                color="#fbbf24"
-                icon="hourglass-half"
-              />
-              <KpiCard
-                label="Sold / Closed"
-                value={`${stockStats.soldQty.toLocaleString('en-IN')} kg`}
-                color="#a78bfa"
-                icon="handshake"
-              />
+              <KpiCard label="Total Stock" value={`${stockStats.totalQty.toLocaleString('en-IN')} kg`} color="#6366f1" icon="cubes" />
+              <KpiCard label="Available" value={`${stockStats.activeQty.toLocaleString('en-IN')} kg`} color="#22c55e" icon="check-circle" />
+              <KpiCard label="Reserved (In Deals)" value={`${stockStats.pendingQty.toLocaleString('en-IN')} kg`} color="#fbbf24" icon="lock" />
+              <KpiCard label="Sold" value={`${stockStats.soldQty.toLocaleString('en-IN')} kg`} color="#a78bfa" icon="handshake" />
             </div>
 
-            {/* Secondary Stats Row */}
             <div className="gp-stats-row" style={{ marginBottom: 24 }}>
               <div className="gp-card">
-                <div className="gp-section-title">
-                  <span>Stock Summary</span>
-                </div>
+                <div className="gp-section-title"><span>Stock Summary</span></div>
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 16 }}>
-                  <div style={{
-                    background: 'rgba(99,102,241,0.08)',
-                    border: '1px solid rgba(99,102,241,0.2)',
-                    borderRadius: 10,
-                    padding: '14px 16px'
-                  }}>
-                    <div style={{ fontSize: '0.75rem', color: '#a78bfa', marginBottom: 4 }}>
-                      <i className="fas fa-boxes me-1"></i> Total Listings
-                    </div>
-                    <div style={{ fontSize: '1.5rem', fontWeight: 700, color: '#a78bfa' }}>
-                      {stockStats.count}
-                    </div>
+                  <div style={{ background: 'rgba(99,102,241,0.08)', border: '1px solid rgba(99,102,241,0.2)', borderRadius: 10, padding: '14px 16px' }}>
+                    <div style={{ fontSize: '0.75rem', color: '#a78bfa', marginBottom: 4 }}><i className="fas fa-boxes me-1"></i> Total Listings</div>
+                    <div style={{ fontSize: '1.5rem', fontWeight: 700, color: '#a78bfa' }}>{stockStats.count}</div>
                   </div>
-
-                  <div style={{
-                    background: 'rgba(34,197,94,0.08)',
-                    border: '1px solid rgba(34,197,94,0.2)',
-                    borderRadius: 10,
-                    padding: '14px 16px'
-                  }}>
-                    <div style={{ fontSize: '0.75rem', color: '#22c55e', marginBottom: 4 }}>
-                      <i className="fas fa-rupee-sign me-1"></i> Total Stock Value
-                    </div>
-                    <div style={{ fontSize: '1.5rem', fontWeight: 700, color: '#22c55e' }}>
-                      ₹{stockStats.totalValue.toLocaleString('en-IN')}
-                    </div>
+                  <div style={{ background: 'rgba(34,197,94,0.08)', border: '1px solid rgba(34,197,94,0.2)', borderRadius: 10, padding: '14px 16px' }}>
+                    <div style={{ fontSize: '0.75rem', color: '#22c55e', marginBottom: 4 }}><i className="fas fa-rupee-sign me-1"></i> Total Stock Value</div>
+                    <div style={{ fontSize: '1.5rem', fontWeight: 700, color: '#22c55e' }}>₹{stockStats.totalValue.toLocaleString('en-IN')}</div>
                   </div>
-
-                  <div style={{
-                    background: 'rgba(251,191,36,0.08)',
-                    border: '1px solid rgba(251,191,36,0.2)',
-                    borderRadius: 10,
-                    padding: '14px 16px'
-                  }}>
-                    <div style={{ fontSize: '0.75rem', color: '#fbbf24', marginBottom: 4 }}>
-                      <i className="fas fa-paper-plane me-1"></i> Offers Sent
-                    </div>
-                    <div style={{ fontSize: '1.5rem', fontWeight: 700, color: '#fbbf24' }}>
-                      {offersSent.length}
-                    </div>
+                  <div style={{ background: 'rgba(251,191,36,0.08)', border: '1px solid rgba(251,191,36,0.2)', borderRadius: 10, padding: '14px 16px' }}>
+                    <div style={{ fontSize: '0.75rem', color: '#fbbf24', marginBottom: 4 }}><i className="fas fa-lock me-1"></i> Reserved</div>
+                    <div style={{ fontSize: '1.5rem', fontWeight: 700, color: '#fbbf24' }}>{stockStats.pendingQty.toLocaleString('en-IN')} kg</div>
                   </div>
-
-                  <div style={{
-                    background: 'rgba(139,92,246,0.08)',
-                    border: '1px solid rgba(139,92,246,0.2)',
-                    borderRadius: 10,
-                    padding: '14px 16px'
-                  }}>
-                    <div style={{ fontSize: '0.75rem', color: '#c4b5fd', marginBottom: 4 }}>
-                      <i className="fas fa-handshake me-1"></i> Total Deals
-                    </div>
-                    <div style={{ fontSize: '1.5rem', fontWeight: 700, color: '#c4b5fd' }}>
-                      {deals.filter(d => String(d.generatorId) === currentUserId).length}
-                    </div>
+                  <div style={{ background: 'rgba(139,92,246,0.08)', border: '1px solid rgba(139,92,246,0.2)', borderRadius: 10, padding: '14px 16px' }}>
+                    <div style={{ fontSize: '0.75rem', color: '#c4b5fd', marginBottom: 4 }}><i className="fas fa-handshake me-1"></i> Total Deals</div>
+                    <div style={{ fontSize: '1.5rem', fontWeight: 700, color: '#c4b5fd' }}>{myDeals.length}</div>
                   </div>
                 </div>
               </div>
 
-              {/* Stock Distribution Chart-like visual */}
               <div className="gp-card">
-                <div className="gp-section-title">
-                  <span>Stock Distribution</span>
-                </div>
-                {stockStats.totalQty > 0 ? (
-                  <>
-                    {/* Active Bar */}
-                    <div style={{ marginBottom: 14 }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', marginBottom: 6 }}>
-                        <span style={{ color: '#22c55e' }}>
-                          <i className="fas fa-circle me-1" style={{ fontSize: '0.5rem' }}></i> Active
-                        </span>
-                        <strong style={{ color: '#22c55e' }}>
-                          {stockStats.activeQty.toLocaleString('en-IN')} kg
-                        </strong>
-                      </div>
-                      <div style={{ height: 10, background: 'rgba(255,255,255,0.05)', borderRadius: 5, overflow: 'hidden' }}>
-                        <div style={{
-                          height: '100%',
-                          width: `${(stockStats.activeQty / stockStats.totalQty) * 100}%`,
-                          background: 'linear-gradient(90deg, #22c55e, #16a34a)',
-                          borderRadius: 5,
-                          transition: 'width 0.5s'
-                        }}></div>
-                      </div>
+                <div className="gp-section-title"><span>Stock Distribution</span></div>
+                {stockStats.totalQty > 0 && pieSlices.length > 0 ? (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 20, flexWrap: 'wrap', justifyContent: 'center' }}>
+                    <svg width="140" height="140" viewBox="0 0 140 140">
+                      {pieSlices.map((s, i) => (
+                        <path key={i} d={s.d} fill={s.color} stroke="#0a0a0f" strokeWidth="2" />
+                      ))}
+                      <circle cx="70" cy="70" r="32" fill="#0a0a0f" />
+                      <text x="70" y="68" textAnchor="middle" fill="#e5e7eb" fontSize="11" fontWeight="700">{stockStats.totalQty.toLocaleString('en-IN')}</text>
+                      <text x="70" y="82" textAnchor="middle" fill="#9ca3af" fontSize="9">kg total</text>
+                    </svg>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                      {pieSlices.map((s, i) => (
+                        <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: '0.8rem' }}>
+                          <span style={{ width: 10, height: 10, borderRadius: 3, background: s.color, flexShrink: 0 }} />
+                          <span style={{ color: '#9ca3af', minWidth: 70 }}>{s.label}</span>
+                          <strong style={{ color: s.color }}>{s.value.toLocaleString('en-IN')} kg</strong>
+                          <span style={{ color: '#6b7280' }}>({s.pct}%)</span>
+                        </div>
+                      ))}
                     </div>
-
-                    {/* Pending Bar */}
-                    <div style={{ marginBottom: 14 }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', marginBottom: 6 }}>
-                        <span style={{ color: '#fbbf24' }}>
-                          <i className="fas fa-circle me-1" style={{ fontSize: '0.5rem' }}></i> Pending
-                        </span>
-                        <strong style={{ color: '#fbbf24' }}>
-                          {stockStats.pendingQty.toLocaleString('en-IN')} kg
-                        </strong>
-                      </div>
-                      <div style={{ height: 10, background: 'rgba(255,255,255,0.05)', borderRadius: 5, overflow: 'hidden' }}>
-                        <div style={{
-                          height: '100%',
-                          width: `${(stockStats.pendingQty / stockStats.totalQty) * 100}%`,
-                          background: 'linear-gradient(90deg, #fbbf24, #d97706)',
-                          borderRadius: 5,
-                          transition: 'width 0.5s'
-                        }}></div>
-                      </div>
-                    </div>
-
-                    {/* Sold Bar */}
-                    <div>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', marginBottom: 6 }}>
-                        <span style={{ color: '#a78bfa' }}>
-                          <i className="fas fa-circle me-1" style={{ fontSize: '0.5rem' }}></i> Sold
-                        </span>
-                        <strong style={{ color: '#a78bfa' }}>
-                          {stockStats.soldQty.toLocaleString('en-IN')} kg
-                        </strong>
-                      </div>
-                      <div style={{ height: 10, background: 'rgba(255,255,255,0.05)', borderRadius: 5, overflow: 'hidden' }}>
-                        <div style={{
-                          height: '100%',
-                          width: `${(stockStats.soldQty / stockStats.totalQty) * 100}%`,
-                          background: 'linear-gradient(90deg, #a78bfa, #8b5cf6)',
-                          borderRadius: 5,
-                          transition: 'width 0.5s'
-                        }}></div>
-                      </div>
-                    </div>
-                  </>
+                  </div>
                 ) : (
                   <div className="gp-no-data-block" style={{ padding: '24px 0' }}>
                     <i className="fas fa-chart-pie fa-2x" style={{ color: '#4b5563', marginBottom: 8 }}></i>
@@ -1864,7 +1926,6 @@ const GeneratorDashboard = () => {
               </div>
             </div>
 
-            {/* Per-Listing Stock Breakdown */}
             <div className="gp-card" style={{ marginBottom: 24 }}>
               <div className="gp-section-title">
                 <span><i className="fas fa-list-ul me-2" style={{ color: '#a78bfa' }}></i>Per-Listing Stock Breakdown</span>
@@ -1882,150 +1943,34 @@ const GeneratorDashboard = () => {
                   <table className="table">
                     <thead>
                       <tr>
-                        <th>Material</th>
-                        <th>Total Qty</th>
-                        <th>Sold</th>
-                        <th>Pending</th>
-                        <th>Available</th>
-                        <th>Price</th>
-                        <th>Total Value</th>
-                        <th>Status</th>
+                        <th>Material</th><th>Total Qty</th><th>Sold</th><th>Reserved</th>
+                        <th>Available</th><th>Price</th><th>Total Value</th><th>Status</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {listingStock.map(l => {
-                        const available = Math.max(0, (Number(l.quantity) || 0) - l.soldQty - l.pendingQty);
-                        return (
-                          <tr key={l._id}>
-                            <td>
-                              <strong>{l.material}</strong>
-                              {l.materialSubtype && <><br /><small style={{ color: '#9ca3af' }}>{l.materialSubtype}</small></>}
-                            </td>
-                            <td><strong>{l.quantity} kg</strong></td>
-                            <td>
-                              {l.soldQty > 0 ? (
-                                <span style={{
-                                  background: 'rgba(167,139,250,0.15)',
-                                  color: '#a78bfa',
-                                  padding: '2px 8px',
-                                  borderRadius: 8,
-                                  fontSize: '0.75rem',
-                                  fontWeight: 600
-                                }}>
-                                  {l.soldQty} kg
-                                </span>
-                              ) : (
-                                <span style={{ color: '#6b7280' }}>—</span>
-                              )}
-                            </td>
-                            <td>
-                              {l.pendingQty > 0 ? (
-                                <span style={{
-                                  background: 'rgba(251,191,36,0.15)',
-                                  color: '#fbbf24',
-                                  padding: '2px 8px',
-                                  borderRadius: 8,
-                                  fontSize: '0.75rem',
-                                  fontWeight: 600
-                                }}>
-                                  {l.pendingQty} kg
-                                </span>
-                              ) : (
-                                <span style={{ color: '#6b7280' }}>—</span>
-                              )}
-                            </td>
-                            <td>
-                              <span style={{
-                                background: 'rgba(34,197,94,0.15)',
-                                color: '#22c55e',
-                                padding: '2px 8px',
-                                borderRadius: 8,
-                                fontSize: '0.75rem',
-                                fontWeight: 600
-                              }}>
-                                {available} kg
-                              </span>
-                            </td>
-                            <td>₹{l.price}/kg</td>
-                            <td style={{ color: '#22c55e', fontWeight: 600 }}>
-                              ₹{l.potentialValue.toLocaleString('en-IN')}
-                            </td>
-                            <td>
-                              <span className={`badge ${getStatusBadgeClass(l.status)}`}>{l.status}</span>
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </div>
-
-            {/* Offers Sent Table */}
-            <div className="gp-card">
-              <div className="gp-section-title">
-                <span>
-                  <i className="fas fa-paper-plane me-2" style={{ color: '#22c55e' }}></i>
-                  Offers Sent to Buyers ({offersSent.length})
-                </span>
-              </div>
-              {offersSent.length === 0 ? (
-                <div className="gp-no-data-block">
-                  <i className="fas fa-inbox fa-2x" style={{ color: '#4b5563', marginBottom: 8 }}></i>
-                  <p>No offers sent yet. Go to Find Clients to send offers.</p>
-                  <button className="gp-btn-primary" style={{ marginTop: 8 }} onClick={() => setActivePage('findClients')}>
-                    <i className="fas fa-search"></i> Find Clients
-                  </button>
-                </div>
-              ) : (
-                <div className="gp-table" style={{ marginTop: 8 }}>
-                  <table className="table">
-                    <thead>
-                      <tr>
-                        <th>Buyer</th>
-                        <th>Material</th>
-                        <th>Quantity</th>
-                        <th>Price/kg</th>
-                        <th>Total</th>
-                        <th>Status</th>
-                        <th>Date</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {offersSent.map(d => (
-                        <tr key={d._id}>
+                      {listingStock.map(l => (
+                        <tr key={l._id}>
                           <td>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                              <div style={{
-                                width: 28,
-                                height: 28,
-                                borderRadius: '50%',
-                                background: 'linear-gradient(135deg, #6366f1, #8b5cf6)',
-                                color: 'white',
-                                display: 'flex',
-                                alignItems: 'center',
-                                justifyContent: 'center',
-                                fontSize: '0.75rem',
-                                fontWeight: 700
-                              }}>
-                                {(d.buyerName || 'U').charAt(0).toUpperCase()}
-                              </div>
-                              <strong>{d.buyerName || 'Unknown Buyer'}</strong>
-                            </div>
+                            <strong>{l.material}</strong>
+                            {l.materialSubtype && <><br /><small style={{ color: '#9ca3af' }}>{l.materialSubtype}</small></>}
                           </td>
-                          <td>{d.material}</td>
-                          <td>{d.quantity} kg</td>
-                          <td>₹{d.pricePerUnit}/kg</td>
-                          <td style={{ color: '#22c55e', fontWeight: 600 }}>
-                            ₹{Number(d.totalAmount).toLocaleString('en-IN')}
+                          <td><strong>{l.quantity} kg</strong></td>
+                          <td>
+                            {l.soldQty > 0 ? (
+                              <span style={{ background: 'rgba(167,139,250,0.15)', color: '#a78bfa', padding: '2px 8px', borderRadius: 8, fontSize: '0.75rem', fontWeight: 600 }}>{l.soldQty} kg</span>
+                            ) : <span style={{ color: '#6b7280' }}>—</span>}
                           </td>
                           <td>
-                            <span className={`badge ${getStatusBadgeClass(d.status)}`}>{d.status}</span>
+                            {l.pendingQty > 0 ? (
+                              <span style={{ background: 'rgba(251,191,36,0.15)', color: '#fbbf24', padding: '2px 8px', borderRadius: 8, fontSize: '0.75rem', fontWeight: 600 }}>{l.pendingQty} kg</span>
+                            ) : <span style={{ color: '#6b7280' }}>—</span>}
                           </td>
                           <td>
-                            <small style={{ color: '#9ca3af' }}>{formatDate(d.createdAt)}</small>
+                            <span style={{ background: 'rgba(34,197,94,0.15)', color: '#22c55e', padding: '2px 8px', borderRadius: 8, fontSize: '0.75rem', fontWeight: 600 }}>{l.available} kg</span>
                           </td>
+                          <td>₹{l.price}/kg</td>
+                          <td style={{ color: '#22c55e', fontWeight: 600 }}>₹{l.potentialValue.toLocaleString('en-IN')}</td>
+                          <td><span className={`badge ${getStatusBadgeClass(l.status)}`}>{l.status}</span></td>
                         </tr>
                       ))}
                     </tbody>
@@ -2033,14 +1978,113 @@ const GeneratorDashboard = () => {
                 </div>
               )}
             </div>
+
+            {/* Stock by Material — Pie (uses capped listingStock) */}
+            <div className="gp-card" style={{ marginBottom: 24 }}>
+              <div className="gp-section-title">
+                <span><i className="fas fa-chart-pie me-2" style={{ color: '#60a5fa' }}></i>Stock by Material</span>
+              </div>
+              {(() => {
+                const byMaterial = {};
+                listingStock.forEach(l => {
+                  const mat = l.material || 'Other';
+                  if (!byMaterial[mat]) byMaterial[mat] = { total: 0, available: 0, reserved: 0, sold: 0 };
+                  byMaterial[mat].total += Number(l.quantity) || 0;
+                  byMaterial[mat].available += l.available;
+                  byMaterial[mat].reserved += l.pendingQty;
+                  byMaterial[mat].sold += l.soldQty;
+                });
+                const entries = Object.entries(byMaterial);
+                if (entries.length === 0) {
+                  return (
+                    <div className="gp-no-data-block" style={{ padding: '24px 0' }}>
+                      <i className="fas fa-chart-pie fa-2x" style={{ color: '#4b5563', marginBottom: 8 }}></i>
+                      <p style={{ fontSize: '0.85rem' }}>No stock data yet</p>
+                    </div>
+                  );
+                }
+                const COLORS = ['#6366f1', '#22c55e', '#fbbf24', '#a78bfa', '#ec4899', '#06b6d4', '#f59e0b', '#84cc16'];
+                const totalAll = entries.reduce((s, [, v]) => s + v.total, 0) || 1;
+                let angle = -90;
+                const slices = entries.map(([mat, v], idx) => {
+                  const sweep = (v.total / totalAll) * 360;
+                  const start = angle;
+                  angle += sweep;
+                  const r = 60, c = 70;
+                  const toRad = (a) => (a * Math.PI) / 180;
+                  const x1 = c + r * Math.cos(toRad(start));
+                  const y1 = c + r * Math.sin(toRad(start));
+                  const x2 = c + r * Math.cos(toRad(start + sweep));
+                  const y2 = c + r * Math.sin(toRad(start + sweep));
+                  const large = sweep > 180 ? 1 : 0;
+                  const d = sweep >= 359.9
+                    ? `M ${c} ${c - r} A ${r} ${r} 0 1 1 ${c - 0.01} ${c - r} Z`
+                    : `M ${c} ${c} L ${x1} ${y1} A ${r} ${r} 0 ${large} 1 ${x2} ${y2} Z`;
+                  return { mat, ...v, d, color: COLORS[idx % COLORS.length], pct: ((v.total / totalAll) * 100).toFixed(1) };
+                });
+                return (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 24, flexWrap: 'wrap', justifyContent: 'center' }}>
+                    <svg width="140" height="140" viewBox="0 0 140 140">
+                      {slices.map((s, i) => (
+                        <path key={i} d={s.d} fill={s.color} stroke="#0a0a0f" strokeWidth="2" />
+                      ))}
+                      <circle cx="70" cy="70" r="32" fill="#0a0a0f" />
+                      <text x="70" y="68" textAnchor="middle" fill="#e5e7eb" fontSize="11" fontWeight="700">{totalAll.toLocaleString('en-IN')}</text>
+                      <text x="70" y="82" textAnchor="middle" fill="#9ca3af" fontSize="9">kg</text>
+                    </svg>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxWidth: 320 }}>
+                      {slices.map((s, i) => (
+                        <div key={i} style={{ fontSize: '0.78rem' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 2 }}>
+                            <span style={{ width: 10, height: 10, borderRadius: 3, background: s.color, flexShrink: 0 }} />
+                            <strong style={{ color: '#e5e7eb', minWidth: 60 }}>{s.mat}</strong>
+                            <span style={{ color: '#9ca3af' }}>{s.total} kg ({s.pct}%)</span>
+                          </div>
+                          <div style={{ marginLeft: 18, color: '#6b7280', fontSize: '0.7rem' }}>
+                            Available <span style={{ color: '#22c55e' }}>{s.available}</span>
+                            {' · '}Reserved <span style={{ color: '#fbbf24' }}>{s.reserved}</span>
+                            {' · '}Sold <span style={{ color: '#a78bfa' }}>{s.sold}</span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })()}
+            </div>
           </div>
         );
       }
 
       case 'bids': {
-        const activeBidListings = bidListings.filter(l => l.status !== 'sold' && l.status !== 'closed');
-        const closedBidListings = bidListings.filter(l => l.status === 'sold' || l.status === 'closed');
-        const shown = bidsTab === 'active' ? activeBidListings : closedBidListings;
+        // Active = live auction (time remaining, not yet awarded)
+        // Completed = awarded / sold / closed / has accepted bid / has deal
+        const listingHasDeal = (l) => {
+          const lid = String(l._id);
+          return deals.some(d => {
+            const dLid = String(d.listingId?._id || d.listingId || '');
+            return dLid === lid && ['offered', 'accepted', 'paid', 'completed'].includes(d.status);
+          });
+        };
+        const isBiddingLive = (l) => {
+          if (l.status === 'sold' || l.status === 'closed') return false;
+          if (!l.biddingEnabled) return false;
+          if ((l.bids || []).some(b => b.status === 'accepted')) return false;
+          if (listingHasDeal(l)) return false;
+          if (!l.biddingEndsAt) return true;
+          return new Date(l.biddingEndsAt).getTime() > Date.now();
+        };
+        const isBiddingCompleted = (l) => {
+          if (l.status === 'sold' || l.status === 'closed') return true;
+          if ((l.bids || []).some(b => b.status === 'accepted')) return true;
+          if (listingHasDeal(l)) return true;
+          const ended = l.biddingEndsAt && new Date(l.biddingEndsAt).getTime() <= Date.now();
+          if (ended && (l.bids || []).length > 0) return true;
+          return false;
+        };
+        const activeBidListings = bidListings.filter(l => isBiddingLive(l));
+        const completedBidListings = bidListings.filter(l => isBiddingCompleted(l));
+        const shown = bidsTab === 'active' ? activeBidListings : completedBidListings;
 
         return (
           <div>
@@ -2057,18 +2101,18 @@ const GeneratorDashboard = () => {
                 Active Bidding
                 <span className="gp-pill-count">{activeBidListings.length}</span>
               </button>
-              <button onClick={() => setBidsTab('closed')} className={`gp-pill-tab ${bidsTab === 'closed' ? 'active' : ''}`}>
+              <button onClick={() => setBidsTab('completed')} className={`gp-pill-tab ${bidsTab === 'completed' ? 'active' : ''}`}>
                 <span className="gp-pill-dot" style={{ background: '#22c55e' }} />
-                Closed / Sold
-                <span className="gp-pill-count">{closedBidListings.length}</span>
+                Completed
+                <span className="gp-pill-count">{completedBidListings.length}</span>
               </button>
             </div>
 
             {shown.length === 0 ? (
               <div className="gp-no-data-block">
                 <i className="fas fa-gavel fa-3x" style={{ color: '#4b5563', marginBottom: 12 }}></i>
-                <p>{bidsTab === 'active' ? 'No active bidding listings.' : 'No closed/sold listings yet.'}</p>
-                <small style={{ color: '#6b7280' }}>Enable bidding when you create a listing.</small>
+                <p>{bidsTab === 'active' ? 'No active bidding listings.' : 'No completed bidding deals yet.'}</p>
+                <small style={{ color: '#6b7280' }}>Enable bidding when you create a listing. When time ends, highest bidder is auto-assigned.</small>
               </div>
             ) : (
               <div className="gp-bid-listings">
@@ -2077,9 +2121,15 @@ const GeneratorDashboard = () => {
                   const topBid = sortedBids[0];
                   const allRequests = listing.requests || [];
                   const pendingRequests = allRequests.filter(r => r.status === 'requested' || r.status === 'offered');
-                  const acceptedRequests = allRequests.filter(r => r.status === 'accepted');
+                  const acceptedRequests = allRequests.filter(r => r.status === 'accepted' || r.status === 'paid');
                   const isEnded = listing.biddingEndsAt && new Date(listing.biddingEndsAt).getTime() <= Date.now();
-                  const isClosed = listing.status === 'sold' || listing.status === 'closed';
+                  const hasAcceptedBid = (listing.bids || []).some(b => b.status === 'accepted' || b.status === 'won');
+                  const hasListingDeal = deals.some(d => {
+                    const lid = String(d.listingId?._id || d.listingId || '');
+                    return lid === String(listing._id) && ['offered', 'accepted', 'paid', 'completed'].includes(d.status);
+                  });
+                  const isClosed = listing.status === 'sold' || listing.status === 'closed' || hasAcceptedBid || hasListingDeal;
+                  const alreadyAwarded = hasAcceptedBid || hasListingDeal;
 
                   return (
                     <div key={listing._id} className="gp-bid-listing-card">
@@ -2101,8 +2151,8 @@ const GeneratorDashboard = () => {
                               <i className="fas fa-lock"></i> Assigned & Closed
                             </span>
                           ) : isEnded ? (
-                            <span className="gp-bid-chip" style={{ background: 'rgba(248,113,113,0.15)', color: '#f87171', border: '1px solid rgba(248,113,113,0.3)' }}>
-                              <i className="fas fa-stopwatch"></i> Bidding Ended — Award Pending
+                            <span className="gp-bid-chip" style={{ background: 'rgba(107,114,128,0.2)', color: '#9ca3af', border: '1px solid rgba(107,114,128,0.35)' }}>
+                              <i className="fas fa-stopwatch"></i> Bidding Closed — Stock Available
                             </span>
                           ) : (
                             <span className="gp-bid-chip">
@@ -2112,7 +2162,6 @@ const GeneratorDashboard = () => {
                         </div>
                       </div>
 
-                      {/* ====== BIDS SECTION ====== */}
                       {sortedBids.length > 0 && (
                         <>
                           <div style={{ fontSize: '0.75rem', color: '#fbbf24', fontWeight: 700, marginBottom: 6, marginTop: 12, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
@@ -2140,10 +2189,10 @@ const GeneratorDashboard = () => {
                                     <td>
                                       {bid.status !== 'accepted' && bid.status !== 'rejected' && !isClosed && (
                                         <>
-                                          <button className="btn-sm btn-outline-success me-1" onClick={() => handleAcceptBid(listing._id, bid.id)}>
+                                          <button className="btn-sm btn-outline-success me-1" onClick={() => handleAcceptBid(listing._id, bid._id || bid.id)}>
                                             <i className="fas fa-check"></i> Accept
                                           </button>
-                                          <button className="btn-sm btn-outline-danger" onClick={() => handleRejectBid(listing._id, bid.id)}>
+                                          <button className="btn-sm btn-outline-danger" onClick={() => handleRejectBid(listing._id, bid._id || bid.id)}>
                                             <i className="fas fa-times"></i>
                                           </button>
                                         </>
@@ -2157,7 +2206,6 @@ const GeneratorDashboard = () => {
                         </>
                       )}
 
-                      {/* ====== DIRECT REQUESTS SECTION ====== */}
                       {pendingRequests.length > 0 && (
                         <>
                           <div style={{ fontSize: '0.75rem', color: '#60a5fa', fontWeight: 700, marginBottom: 6, marginTop: 16, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
@@ -2196,11 +2244,10 @@ const GeneratorDashboard = () => {
                         </>
                       )}
 
-                      {/* ====== ACCEPTED REQUESTS (Awaiting Completion) ====== */}
                       {acceptedRequests.length > 0 && (
                         <>
                           <div style={{ fontSize: '0.75rem', color: '#22c55e', fontWeight: 700, marginBottom: 6, marginTop: 16, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
-                            <i className="fas fa-check-circle me-2"></i>Accepted Deals ({acceptedRequests.length})
+                            <i className="fas fa-check-circle me-2"></i>Accepted / Paid Deals ({acceptedRequests.length})
                           </div>
                           <div className="gp-bid-table">
                             <table className="table">
@@ -2214,13 +2261,13 @@ const GeneratorDashboard = () => {
                                     <td>{req.quantity} kg</td>
                                     <td>₹{req.amount}/kg</td>
                                     <td style={{ color: '#22c55e', fontWeight: 600 }}>₹{req.totalAmount?.toLocaleString('en-IN')}</td>
-                                    <td><span className="badge status-active">Paid</span></td>
                                     <td>
-                                      <button
-                                        className="btn-sm btn-outline-success"
-                                        onClick={() => completeDeal(req._id)}
-                                        title="Mark as delivered after handover"
-                                      >
+                                      <span className={`badge ${getStatusBadgeClass(req.status)}`}>
+                                        {req.status === 'paid' ? '💰 Paid' : 'Accepted (Unpaid)'}
+                                      </span>
+                                    </td>
+                                    <td>
+                                      <button className="btn-sm btn-outline-success" onClick={() => completeDeal(req._id)} title="Mark as delivered after handover">
                                         <i className="fas fa-truck"></i> Mark Delivered
                                       </button>
                                     </td>
@@ -2232,48 +2279,55 @@ const GeneratorDashboard = () => {
                         </>
                       )}
 
-                      {/* ====== AWARD BUTTON (only when ended & has bids) ====== */}
-                      {isEnded && !isClosed && sortedBids.length > 0 && (
+                      {isEnded && !alreadyAwarded && sortedBids.length > 0 && (
                         <div style={{
-                          marginTop: 16,
-                          padding: '14px 16px',
+                          marginTop: 16, padding: '14px 16px',
                           background: 'linear-gradient(135deg, rgba(251,191,36,0.12), rgba(139,92,246,0.08))',
-                          border: '1px solid rgba(251,191,36,0.3)',
-                          borderRadius: 10,
-                          display: 'flex',
-                          justifyContent: 'space-between',
-                          alignItems: 'center',
-                          flexWrap: 'wrap',
-                          gap: 12
+                          border: '1px solid rgba(251,191,36,0.3)', borderRadius: 10,
+                          display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12
                         }}>
                           <div>
                             <div style={{ color: '#fbbf24', fontWeight: 700, fontSize: '0.85rem', marginBottom: 2 }}>
-                              <i className="fas fa-flag-checkered me-2"></i>
-                              Bidding Ended
+                              <i className="fas fa-flag-checkered me-2"></i>Bidding Ended
                             </div>
                             <div style={{ color: '#9ca3af', fontSize: '0.78rem' }}>
-                              Highest bidder: <strong style={{ color: '#22c55e' }}>{topBid.buyerName}</strong> at <strong style={{ color: '#fbbf24' }}>₹{topBid.amount}/kg</strong>
+                              Highest bidder: <strong style={{ color: '#22c55e' }}>{topBid?.buyerName}</strong> at <strong style={{ color: '#fbbf24' }}>₹{topBid?.amount}/kg</strong>
                             </div>
                           </div>
-                          <button
-                            className="gp-btn-primary"
-                            style={{
-                              background: 'linear-gradient(135deg, #fbbf24, #f59e0b)',
-                              boxShadow: '0 4px 14px rgba(251,191,36,0.3)'
-                            }}
-                            onClick={() => handleAutoAward(listing)}
-                          >
+                          <button className="gp-btn-primary" style={{ background: 'linear-gradient(135deg, #fbbf24, #f59e0b)', boxShadow: '0 4px 14px rgba(251,191,36,0.3)' }} onClick={() => handleAutoAward(listing)}>
                             <i className="fas fa-crown"></i> Award to Highest Bidder
                           </button>
                         </div>
                       )}
+                      {alreadyAwarded && (
+                        <div style={{
+                          marginTop: 16, padding: '12px 16px',
+                          background: 'rgba(16,185,129,0.1)', border: '1px solid rgba(16,185,129,0.3)',
+                          borderRadius: 10, fontSize: '0.82rem', color: '#6ee7b7'
+                        }}>
+                          <i className="fas fa-check-circle me-2"></i>
+                          Already awarded — offer/deal is with the buyer. Check Deals tab for status.
+                        </div>
+                      )}
 
-                      {/* ====== EMPTY STATE ====== */}
                       {sortedBids.length === 0 && pendingRequests.length === 0 && acceptedRequests.length === 0 && (
                         <p className="gp-no-data" style={{ padding: '16px 0', textAlign: 'center' }}>
-                          <i className="fas fa-hourglass-half me-2"></i>
-                          Waiting for bids and requests...
+                          {isEnded ? (
+                            <><i className="fas fa-box-open me-2"></i>Bidding closed. Stock restored — buyers can request this listing directly.</>
+                          ) : (
+                            <><i className="fas fa-hourglass-half me-2"></i>Waiting for bids and requests...</>
+                          )}
                         </p>
+                      )}
+                      {isEnded && !alreadyAwarded && sortedBids.length === 0 && (
+                        <div style={{
+                          marginTop: 12, padding: '12px 14px',
+                          background: 'rgba(34,197,94,0.08)', border: '1px solid rgba(34,197,94,0.25)',
+                          borderRadius: 10, fontSize: '0.8rem', color: '#86efac'
+                        }}>
+                          <i className="fas fa-check-circle me-2"></i>
+                          Listing is available again for direct buyer requests / generator offers.
+                        </div>
                       )}
                     </div>
                   );
@@ -2390,7 +2444,6 @@ const GeneratorDashboard = () => {
         return (
           <div className="gp-messages-page">
             <div className="gp-messages-grid">
-              {/* Conversations Panel */}
               <div className="gp-conv-panel">
                 <div className="gp-conv-header">
                   <h6><i className="fas fa-comments me-2"></i>Conversations</h6>
@@ -2425,7 +2478,6 @@ const GeneratorDashboard = () => {
                 </div>
               </div>
 
-              {/* Chat Panel */}
               <div className="gp-chat-panel">
                 {!selectedConversation ? (
                   <div className="gp-chat-placeholder">
@@ -2477,88 +2529,150 @@ const GeneratorDashboard = () => {
         );
 
       case 'deals': {
-        // ✅ FIX: user?._id undefined tha, isliye fallback zaroori hai
         const cid = String(user?._id || user?.id || '');
-        const myDeals = deals.filter(d => String(d.generatorId) === cid);
-        const sentOffers = myDeals.filter(d => d.initiatedBy === 'generator');
-        const receivedRequests = myDeals.filter(d => d.initiatedBy === 'buyer');
+        const myDeals = deals.filter(d => String(d.generatorId?._id || d.generatorId) === cid);
+
+        const pendingOffersSent = myDeals.filter(d => d.status === 'offered');
+        const paidDeals = myDeals.filter(d => d.status === 'paid');
+        const completedDealsList = myDeals.filter(d => d.status === 'completed');
+
+        const renderDealTable = (dealList, emptyMsg, showAction = false) => (
+          dealList.length === 0 ? (
+            <div className="gp-no-data-block" style={{ padding: '24px 0' }}>
+              <i className="fas fa-inbox fa-2x" style={{ color: '#4b5563', marginBottom: 8 }}></i>
+              <p style={{ fontSize: '0.85rem' }}>{emptyMsg}</p>
+            </div>
+          ) : (
+            <div className="gp-table">
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>Buyer</th>
+                    <th>Material</th>
+                    <th>Qty</th>
+                    <th>Price/kg</th>
+                    <th>Total</th>
+                    <th>Status</th>
+                    <th>Date</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {dealList
+                    .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+                    .map(d => (
+                      <tr key={d._id}>
+                        <td>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                            <div style={{
+                              width: 28, height: 28, borderRadius: '50%',
+                              background: 'linear-gradient(135deg, #22c55e, #16a34a)',
+                              color: 'white', display: 'flex', alignItems: 'center',
+                              justifyContent: 'center', fontSize: '0.72rem', fontWeight: 700
+                            }}>
+                              {(d.buyerName || 'U').charAt(0).toUpperCase()}
+                            </div>
+                            <strong style={{ fontSize: '0.88rem' }}>{d.buyerName || 'Unknown'}</strong>
+                          </div>
+                        </td>
+                        <td style={{ fontSize: '0.88rem' }}>{d.material}</td>
+                        <td style={{ fontSize: '0.88rem' }}>{d.quantity} kg</td>
+                        <td style={{ fontSize: '0.88rem' }}>₹{d.pricePerUnit}/kg</td>
+                        <td style={{ color: '#22c55e', fontWeight: 600, fontSize: '0.88rem' }}>
+                          ₹{Number(d.totalAmount).toLocaleString('en-IN')}
+                        </td>
+                        <td>
+                          <span className={`badge ${getStatusBadgeClass(d.status)}`} style={{ fontSize: '0.72rem' }}>
+                            {getDealStatusLabel(d)}
+                          </span>
+                        </td>
+                        <td>
+                          <small style={{ color: '#9ca3af', fontSize: '0.75rem' }}>{formatDate(d.createdAt)}</small>
+                        </td>
+                      </tr>
+                    ))}
+                </tbody>
+              </table>
+            </div>
+          )
+        );
 
         return (
           <div>
-            <div className="gp-page-header"><h2>My Deals ({myDeals.length})</h2></div>
-
-            {/* Sent Offers */}
-            <div style={{ marginBottom: 24 }}>
-              <h3 style={{ fontSize: '1rem', color: '#22c55e', marginBottom: 12 }}>
-                <i className="fas fa-paper-plane me-2"></i>Offers Sent ({sentOffers.length})
-              </h3>
-              {sentOffers.length === 0 ? (
-                <p style={{ color: '#6b7280', fontSize: '0.85rem' }}>No offers sent yet.</p>
-              ) : (
-                <div className="gp-table">
-                  <table className="table">
-                    <thead><tr><th>Material</th><th>Qty</th><th>Total</th><th>Buyer</th><th>Status</th><th>Date</th></tr></thead>
-                    <tbody>
-                      {sentOffers.map(d => (
-                        <tr key={d._id}>
-                          <td><strong>{d.material}</strong></td>
-                          <td>{d.quantity} kg</td>
-                          <td>₹{d.totalAmount}</td>
-                          <td>{d.buyerName || '—'}</td>
-                          <td><span className={`badge ${getStatusBadgeClass(d.status)}`}>{d.status}</span></td>
-                          <td><small style={{ color: '#9ca3af' }}>{formatDate(d.createdAt)}</small></td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
+            <div className="gp-page-header">
+              <h2>My Deals</h2>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                <span className="badge status-pending">📤 {pendingOffersSent.length} Offered</span>
+                <span className="badge status-paid">💰 {paidDeals.length} Paid</span>
+                <span className="badge status-completed">✔️ {completedDealsList.length} Completed</span>
+              </div>
             </div>
 
-            {/* Received Requests */}
-            <div>
+            <div style={{
+              padding: '12px 16px',
+              background: 'rgba(96,165,250,0.08)',
+              border: '1px solid rgba(96,165,250,0.25)',
+              borderRadius: 10,
+              marginBottom: 20,
+              fontSize: '0.82rem',
+              color: '#93c5fd',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8
+            }}>
+              <i className="fas fa-info-circle"></i>
+              <span>
+                Buyer "Mark Received" karne ke baad deal automatic <strong>Completed</strong> ho jayegi.
+                <span style={{ color: '#6b7280', marginLeft: 8 }}>Handover material to buyer before they confirm.</span>
+              </span>
+            </div>
+
+            <div style={{ marginBottom: 28 }}>
               <h3 style={{ fontSize: '1rem', color: '#fbbf24', marginBottom: 12 }}>
-                <i className="fas fa-inbox me-2"></i>Requests Received ({receivedRequests.length})
+                <i className="fas fa-paper-plane me-2"></i>My Pending Offers ({pendingOffersSent.length})
+                <span style={{ fontSize: '0.72rem', color: '#6b7280', fontWeight: 400, marginLeft: 8 }}>
+                  Waiting for buyer to accept
+                </span>
               </h3>
-              {receivedRequests.length === 0 ? (
-                <p style={{ color: '#6b7280', fontSize: '0.85rem' }}>No requests received yet.</p>
-              ) : (
-                <div className="gp-table">
-                  <table className="table">
-                    <thead><tr><th>Material</th><th>Qty</th><th>Total</th><th>Buyer</th><th>Status</th><th>Actions</th></tr></thead>
-                    <tbody>
-                      {receivedRequests.map(d => (
-                        <tr key={d._id}>
-                          <td><strong>{d.material}</strong></td>
-                          <td>{d.quantity} kg</td>
-                          <td>₹{d.totalAmount}</td>
-                          <td>{d.buyerName || '—'}</td>
-                          <td><span className={`badge ${getStatusBadgeClass(d.status)}`}>{d.status}</span></td>
-                          <td>
-                            {d.status === 'requested' && (
-                              <>
-                                <button className="btn-sm btn-outline-success me-1" onClick={() => acceptDeal(d._id)}><i className="fas fa-check"></i> Accept</button>
-                                <button className="btn-sm btn-outline-danger" onClick={() => rejectDeal(d._id)}><i className="fas fa-times"></i> Reject</button>
-                              </>
-                            )}
-                            {d.status === 'accepted' && (
-                              <button
-                                className="btn-sm btn-outline-success"
-                                onClick={() => completeDeal(d._id)}
-                                style={{ background: 'rgba(34,197,94,0.15)', color: '#22c55e', borderColor: 'rgba(34,197,94,0.3)' }}
-                                title="Click after material is handed over"
-                              >
-                                <i className="fas fa-truck"></i> Mark as Delivered
-                              </button>
-                            )}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
+              {renderDealTable(pendingOffersSent, 'No pending offers sent. Go to "Find Requirements" to send offers.')}
             </div>
+
+            {paidDeals.length > 0 && (
+              <div style={{ marginBottom: 28 }}>
+                <h3 style={{ fontSize: '1rem', color: '#22c55e', marginBottom: 12 }}>
+                  <i className="fas fa-rupee-sign me-2"></i>Paid — Handover Material ({paidDeals.length})
+                  <span style={{ fontSize: '0.72rem', color: '#6b7280', fontWeight: 400, marginLeft: 8 }}>
+                    Buyer paid. Deliver material now — buyer will mark received.
+                  </span>
+                </h3>
+                {renderDealTable(paidDeals, 'No paid deals awaiting delivery')}
+              </div>
+            )}
+
+            {completedDealsList.length > 0 && (
+              <div style={{ marginBottom: 28 }}>
+                <h3 style={{ fontSize: '1rem', color: '#a78bfa', marginBottom: 12 }}>
+                  <i className="fas fa-check-circle me-2"></i>Completed Deals ({completedDealsList.length})
+                  <span style={{ fontSize: '0.72rem', color: '#6b7280', fontWeight: 400, marginLeft: 8 }}>
+                    Buyer confirmed receipt — deal closed
+                  </span>
+                </h3>
+                {renderDealTable(completedDealsList, 'No completed deals yet')}
+              </div>
+            )}
+
+            {myDeals.filter(d => d.status !== 'rejected').length === 0 && (
+              <div className="gp-no-data-block" style={{ padding: '48px 0' }}>
+                <i className="fas fa-handshake fa-3x" style={{ color: '#4b5563', marginBottom: 12 }}></i>
+                <p>No deals yet</p>
+                <button
+                  className="gp-btn-primary"
+                  style={{ marginTop: 12 }}
+                  onClick={() => setActivePage('findRequirements')}
+                >
+                  <i className="fas fa-search"></i> Find Requirements
+                </button>
+              </div>
+            )}
           </div>
         );
       }
@@ -2570,10 +2684,8 @@ const GeneratorDashboard = () => {
               <h2>💸 Withdraw Money</h2>
             </div>
 
-            {/* Balance Card */}
             <div className="gp-form-card" style={{
-              maxWidth: 'none',
-              marginBottom: 20,
+              maxWidth: 'none', marginBottom: 20,
               background: 'linear-gradient(135deg, rgba(34,197,94,0.08), rgba(99,102,241,0.06))',
               border: '1px solid rgba(34,197,94,0.2)'
             }}>
@@ -2587,17 +2699,12 @@ const GeneratorDashboard = () => {
                   </div>
                 </div>
                 <div style={{ textAlign: 'right' }}>
-                  <div style={{ fontSize: '0.75rem', color: '#9ca3af' }}>
-                    Min: ₹100 · Max: Balance
-                  </div>
-                  <div style={{ fontSize: '0.75rem', color: '#9ca3af', marginTop: 4 }}>
-                    Credit in 24-48 hrs
-                  </div>
+                  <div style={{ fontSize: '0.75rem', color: '#9ca3af' }}>Min: ₹100 · Max: Balance</div>
+                  <div style={{ fontSize: '0.75rem', color: '#9ca3af', marginTop: 4 }}>Credit in 24-48 hrs</div>
                 </div>
               </div>
             </div>
 
-            {/* Withdrawal Form */}
             <div className="gp-form-card" style={{ maxWidth: 'none', marginBottom: 20 }}>
               <h3 style={{ marginTop: 0, color: '#a78bfa', fontSize: '1rem' }}>
                 <i className="fas fa-plus-circle me-2"></i>New Withdrawal Request
@@ -2605,42 +2712,30 @@ const GeneratorDashboard = () => {
 
               <div className="gp-form-group">
                 <label>Amount (₹) *</label>
-                <input
-                  type="number"
-                  value={withdrawAmount}
-                  onChange={(e) => setWithdrawAmount(e.target.value)}
-                  placeholder="Enter amount (min ₹100)"
-                  min="100"
-                />
+                <input type="number" value={withdrawAmount} onChange={(e) => setWithdrawAmount(e.target.value)} placeholder="Enter amount (min ₹100)" min="100" />
               </div>
 
               <div className="gp-form-group">
                 <label>Withdrawal Method *</label>
                 <div style={{ display: 'flex', gap: 10 }}>
-                  <button
-                    type="button"
-                    onClick={() => setWithdrawMethod('upi')}
+                  <button type="button" onClick={() => setWithdrawMethod('upi')}
                     style={{
                       flex: 1, padding: '12px', borderRadius: 10,
                       border: withdrawMethod === 'upi' ? '2px solid #22c55e' : '1px solid rgba(255,255,255,0.1)',
                       background: withdrawMethod === 'upi' ? 'rgba(34,197,94,0.1)' : 'rgba(255,255,255,0.03)',
                       color: withdrawMethod === 'upi' ? '#22c55e' : '#9ca3af',
                       cursor: 'pointer', fontWeight: 600, fontSize: '0.85rem'
-                    }}
-                  >
+                    }}>
                     <i className="fas fa-mobile-alt me-2"></i>UPI
                   </button>
-                  <button
-                    type="button"
-                    onClick={() => setWithdrawMethod('bank')}
+                  <button type="button" onClick={() => setWithdrawMethod('bank')}
                     style={{
                       flex: 1, padding: '12px', borderRadius: 10,
                       border: withdrawMethod === 'bank' ? '2px solid #22c55e' : '1px solid rgba(255,255,255,0.1)',
                       background: withdrawMethod === 'bank' ? 'rgba(34,197,94,0.1)' : 'rgba(255,255,255,0.03)',
                       color: withdrawMethod === 'bank' ? '#22c55e' : '#9ca3af',
                       cursor: 'pointer', fontWeight: 600, fontSize: '0.85rem'
-                    }}
-                  >
+                    }}>
                     <i className="fas fa-university me-2"></i>Bank Account
                   </button>
                 </div>
@@ -2649,63 +2744,32 @@ const GeneratorDashboard = () => {
               {withdrawMethod === 'upi' ? (
                 <div className="gp-form-group">
                   <label>UPI ID *</label>
-                  <input
-                    type="text"
-                    value={withdrawUPI}
-                    onChange={(e) => setWithdrawUPI(e.target.value)}
-                    placeholder="yourname@upi (e.g. 9876543210@ybl)"
-                  />
+                  <input type="text" value={withdrawUPI} onChange={(e) => setWithdrawUPI(e.target.value)} placeholder="yourname@upi (e.g. 9876543210@ybl)" />
                 </div>
               ) : (
                 <div className="gp-form-grid">
                   <div className="gp-form-group">
                     <label>Account Holder Name *</label>
-                    <input
-                      type="text"
-                      value={withdrawBank.accountHolder}
-                      onChange={(e) => setWithdrawBank({ ...withdrawBank, accountHolder: e.target.value })}
-                      placeholder="Full name as on bank"
-                    />
+                    <input type="text" value={withdrawBank.accountHolder} onChange={(e) => setWithdrawBank({ ...withdrawBank, accountHolder: e.target.value })} placeholder="Full name as on bank" />
                   </div>
                   <div className="gp-form-group">
                     <label>Account Number *</label>
-                    <input
-                      type="text"
-                      value={withdrawBank.accountNumber}
-                      onChange={(e) => setWithdrawBank({ ...withdrawBank, accountNumber: e.target.value })}
-                      placeholder="1234567890123"
-                    />
+                    <input type="text" value={withdrawBank.accountNumber} onChange={(e) => setWithdrawBank({ ...withdrawBank, accountNumber: e.target.value })} placeholder="1234567890123" />
                   </div>
                   <div className="gp-form-group">
                     <label>IFSC Code *</label>
-                    <input
-                      type="text"
-                      value={withdrawBank.ifscCode}
-                      onChange={(e) => setWithdrawBank({ ...withdrawBank, ifscCode: e.target.value.toUpperCase() })}
-                      placeholder="HDFC0001234"
-                      maxLength={11}
-                    />
+                    <input type="text" value={withdrawBank.ifscCode} onChange={(e) => setWithdrawBank({ ...withdrawBank, ifscCode: e.target.value.toUpperCase() })} placeholder="HDFC0001234" maxLength={11} />
                   </div>
                   <div className="gp-form-group">
                     <label>Bank Name</label>
-                    <input
-                      type="text"
-                      value={withdrawBank.bankName}
-                      onChange={(e) => setWithdrawBank({ ...withdrawBank, bankName: e.target.value })}
-                      placeholder="HDFC Bank"
-                    />
+                    <input type="text" value={withdrawBank.bankName} onChange={(e) => setWithdrawBank({ ...withdrawBank, bankName: e.target.value })} placeholder="HDFC Bank" />
                   </div>
                 </div>
               )}
 
               {withdrawError && <small className="gp-error-text" style={{ display: 'block', marginBottom: 12 }}>{withdrawError}</small>}
 
-              <button
-                className="gp-btn-primary"
-                style={{ width: '100%' }}
-                onClick={handleWithdraw}
-                disabled={withdrawLoading}
-              >
+              <button className="gp-btn-primary" style={{ width: '100%' }} onClick={handleWithdraw} disabled={withdrawLoading}>
                 {withdrawLoading ? (
                   <><i className="fas fa-spinner fa-spin me-2"></i>Processing...</>
                 ) : (
@@ -2719,7 +2783,6 @@ const GeneratorDashboard = () => {
               </div>
             </div>
 
-            {/* Withdrawal History */}
             <div className="gp-form-card" style={{ maxWidth: 'none' }}>
               <h3 style={{ marginTop: 0, color: '#60a5fa', fontSize: '1rem' }}>
                 <i className="fas fa-history me-2"></i>Withdrawal History ({withdrawals.length})
@@ -2735,19 +2798,13 @@ const GeneratorDashboard = () => {
                   <table className="table">
                     <thead>
                       <tr>
-                        <th>Amount</th>
-                        <th>Method</th>
-                        <th>Details</th>
-                        <th>Status</th>
-                        <th>Date</th>
+                        <th>Amount</th><th>Method</th><th>Details</th><th>Status</th><th>Date</th>
                       </tr>
                     </thead>
                     <tbody>
                       {withdrawals.map(w => (
                         <tr key={w._id}>
-                          <td>
-                            <strong style={{ color: '#f87171' }}>-₹{w.amount.toLocaleString('en-IN')}</strong>
-                          </td>
+                          <td><strong style={{ color: '#f87171' }}>-₹{w.amount.toLocaleString('en-IN')}</strong></td>
                           <td>
                             <span style={{
                               background: w.method === 'upi' ? 'rgba(139,92,246,0.15)' : 'rgba(96,165,250,0.15)',
@@ -2766,15 +2823,12 @@ const GeneratorDashboard = () => {
                           <td>
                             <span className={`badge ${w.status === 'completed' ? 'status-active' :
                               w.status === 'pending' ? 'status-pending' :
-                                w.status === 'processing' ? 'status-pending' :
-                                  'status-closed'
+                                w.status === 'processing' ? 'status-pending' : 'status-closed'
                               }`}>
                               {w.status}
                             </span>
                           </td>
-                          <td>
-                            <small style={{ color: '#9ca3af' }}>{formatDate(w.createdAt)}</small>
-                          </td>
+                          <td><small style={{ color: '#9ca3af' }}>{formatDate(w.createdAt)}</small></td>
                         </tr>
                       ))}
                     </tbody>
@@ -2810,14 +2864,9 @@ const GeneratorDashboard = () => {
               <span style={{
                 background: profileForm.isCompanyVerified ? 'rgba(34,197,94,0.15)' : 'rgba(251,191,36,0.15)',
                 color: profileForm.isCompanyVerified ? '#22c55e' : '#fbbf24',
-                padding: '6px 14px',
-                borderRadius: 20,
-                fontSize: '0.72rem',
-                fontWeight: 700,
+                padding: '6px 14px', borderRadius: 20, fontSize: '0.72rem', fontWeight: 700,
                 border: `1px solid ${profileForm.isCompanyVerified ? 'rgba(34,197,94,0.3)' : 'rgba(251,191,36,0.3)'}`,
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: 6
+                display: 'inline-flex', alignItems: 'center', gap: 6
               }}>
                 <i className={`fas fa-${profileForm.isCompanyVerified ? 'check-circle' : 'clock'}`}></i>
                 {profileForm.isCompanyVerified ? 'Company Verified' : 'Verification Pending'}
@@ -2825,7 +2874,6 @@ const GeneratorDashboard = () => {
             </div>
 
             <form onSubmit={handleProfileUpdate}>
-              {/* === ACCOUNT INFO === */}
               <div className="gp-form-card" style={{ maxWidth: 'none', marginBottom: 20 }}>
                 <h3 style={{ marginTop: 0, color: '#a78bfa', fontSize: '1rem', marginBottom: 18 }}>
                   <i className="fas fa-user me-2"></i>Account Information
@@ -2853,31 +2901,18 @@ const GeneratorDashboard = () => {
                 </div>
               </div>
 
-              {/* === COMPANY INFO === */}
               <div className="gp-form-card" style={{ maxWidth: 'none', marginBottom: 20 }}>
                 <h3 style={{ marginTop: 0, color: '#60a5fa', fontSize: '1rem', marginBottom: 18 }}>
                   <i className="fas fa-building me-2"></i>Company Information
                 </h3>
                 <div className="gp-form-grid">
                   {companyFields.map(field => (
-                    <div
-                      key={field.key}
-                      className="gp-form-group"
-                      style={{ gridColumn: field.type === 'textarea' ? '1/-1' : 'auto' }}
-                    >
+                    <div key={field.key} className="gp-form-group" style={{ gridColumn: field.type === 'textarea' ? '1/-1' : 'auto' }}>
                       <label>{field.label}</label>
                       {field.type === 'textarea' ? (
-                        <textarea
-                          rows={2}
-                          value={profileForm[field.key] || ''}
-                          onChange={(e) => setProfileForm({ ...profileForm, [field.key]: e.target.value })}
-                        />
+                        <textarea rows={2} value={profileForm[field.key] || ''} onChange={(e) => setProfileForm({ ...profileForm, [field.key]: e.target.value })} />
                       ) : (
-                        <input
-                          type={field.type}
-                          value={profileForm[field.key] || ''}
-                          onChange={(e) => setProfileForm({ ...profileForm, [field.key]: e.target.value })}
-                        />
+                        <input type={field.type} value={profileForm[field.key] || ''} onChange={(e) => setProfileForm({ ...profileForm, [field.key]: e.target.value })} />
                       )}
                     </div>
                   ))}
@@ -2894,12 +2929,7 @@ const GeneratorDashboard = () => {
                   </div>
                   <div className="gp-form-group" style={{ gridColumn: '1/-1' }}>
                     <label>Business Description</label>
-                    <textarea
-                      rows={3}
-                      value={profileForm.businessDescription || ''}
-                      onChange={(e) => setProfileForm({ ...profileForm, businessDescription: e.target.value })}
-                      placeholder="Brief about your business..."
-                    />
+                    <textarea rows={3} value={profileForm.businessDescription || ''} onChange={(e) => setProfileForm({ ...profileForm, businessDescription: e.target.value })} placeholder="Brief about your business..." />
                   </div>
                 </div>
               </div>
@@ -3067,7 +3097,12 @@ const GeneratorDashboard = () => {
                 const isSelected = selectedListingForOffer?._id === l._id;
                 const totalValue = l.quantity * l.price;
                 return (
-                  <div key={l._id} onClick={() => setSelectedListingForOffer(l)}
+                  <div key={l._id} onClick={() => {
+                    setSelectedListingForOffer(l);
+                    const maxQty = Math.min(Number(req.maxQty) || l.quantity, l.quantity);
+                    setOfferQuantity(String(maxQty));
+                    setOfferPrice(String(l.price || req.maxPrice));
+                  }}
                     style={{
                       background: isSelected ? 'rgba(34,197,94,0.12)' : 'rgba(255,255,255,0.03)',
                       border: isSelected ? '2px solid #22c55e' : '1px solid rgba(255,255,255,0.08)',
@@ -3101,9 +3136,78 @@ const GeneratorDashboard = () => {
             </div>
 
             {selectedListingForOffer && (
-              <div style={{ marginTop: 16, padding: '12px 16px', background: 'rgba(34,197,94,0.08)', border: '1px solid rgba(34,197,94,0.25)', borderRadius: 10, fontSize: '0.82rem', color: '#86efac', display: 'flex', alignItems: 'center', gap: 10 }}>
-                <i className="fas fa-info-circle"></i>
-                <span>Offering <strong>{selectedListingForOffer.quantity} kg</strong> at <strong>₹{selectedListingForOffer.price}/kg</strong></span>
+              <div style={{ marginTop: 16, padding: '16px', background: 'rgba(34,197,94,0.08)', border: '1px solid rgba(34,197,94,0.25)', borderRadius: 10 }}>
+                <div style={{ fontSize: '0.72rem', color: '#86efac', marginBottom: 10, textTransform: 'uppercase', letterSpacing: '0.5px', fontWeight: 700 }}>
+                  <i className="fas fa-handshake me-1"></i> Finalize Offer
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 10 }}>
+                  <div>
+                    <label style={{ fontSize: '0.72rem', color: '#9ca3af', display: 'block', marginBottom: 4 }}>
+                      Quantity (kg) *
+                    </label>
+                    <input
+                      type="number"
+                      value={offerQuantity}
+                      onChange={(e) => setOfferQuantity(e.target.value)}
+                      min={req.minQty || 1}
+                      max={Math.min(Number(req.maxQty) || selectedListingForOffer.quantity, selectedListingForOffer.quantity)}
+                      style={{
+                        width: '100%', padding: '8px 12px', borderRadius: 8,
+                        border: '1px solid rgba(255,255,255,0.15)',
+                        background: 'rgba(255,255,255,0.05)',
+                        color: 'white', fontSize: '0.9rem'
+                      }}
+                    />
+                    <small style={{ fontSize: '0.7rem', color: '#6b7280' }}>
+                      Range: {req.minQty}-{Math.min(req.maxQty, selectedListingForOffer.quantity)} kg
+                    </small>
+                  </div>
+
+                  <div>
+                    <label style={{ fontSize: '0.72rem', color: '#9ca3af', display: 'block', marginBottom: 4 }}>
+                      Price (₹/kg) *
+                    </label>
+                    <input
+                      type="number"
+                      value={offerPrice}
+                      onChange={(e) => setOfferPrice(e.target.value)}
+                      min={1}
+                      max={req.maxPrice}
+                      style={{
+                        width: '100%', padding: '8px 12px', borderRadius: 8,
+                        border: '1px solid rgba(255,255,255,0.15)',
+                        background: 'rgba(255,255,255,0.05)',
+                        color: 'white', fontSize: '0.9rem'
+                      }}
+                    />
+                    <small style={{ fontSize: '0.7rem', color: '#6b7280' }}>
+                      Buyer max: ₹{req.maxPrice}/kg · Your listing: ₹{selectedListingForOffer.price}/kg
+                    </small>
+                  </div>
+                </div>
+
+                <div style={{
+                  padding: '10px 14px',
+                  background: 'rgba(255,255,255,0.03)',
+                  borderRadius: 8,
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  fontSize: '0.82rem'
+                }}>
+                  <span style={{ color: '#9ca3af' }}>Total Amount</span>
+                  <strong style={{ color: '#22c55e', fontSize: '1.1rem' }}>
+                    ₹{((Number(offerQuantity) || 0) * (Number(offerPrice) || 0)).toLocaleString('en-IN')}
+                  </strong>
+                </div>
+
+                {(Number(offerQuantity) > selectedListingForOffer.quantity) && (
+                  <div style={{ marginTop: 8, fontSize: '0.75rem', color: '#f87171' }}>
+                    <i className="fas fa-exclamation-triangle me-1"></i>
+                    Quantity exceeds your listing stock ({selectedListingForOffer.quantity} kg)
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -3111,7 +3215,7 @@ const GeneratorDashboard = () => {
           <div style={{ padding: '16px 24px', borderTop: '1px solid rgba(255,255,255,0.05)', display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
             <button onClick={() => { setOfferRequirement(null); setSelectedListingForOffer(null); }}
               style={{ padding: '10px 20px', borderRadius: 9, border: '1px solid rgba(255,255,255,0.1)', background: 'transparent', color: '#e5e7eb', cursor: 'pointer', fontWeight: 600, fontSize: '0.9rem' }}>Cancel</button>
-            <button onClick={confirmSendOffer} disabled={!selectedListingForOffer}
+            <button onClick={confirmSendOffer} disabled={!selectedListingForOffer || isSendingOffer}
               style={{
                 padding: '10px 24px', borderRadius: 9, border: 'none',
                 background: selectedListingForOffer ? 'linear-gradient(135deg, #22c55e, #16a34a)' : 'rgba(255,255,255,0.08)',
@@ -3119,7 +3223,7 @@ const GeneratorDashboard = () => {
                 cursor: selectedListingForOffer ? 'pointer' : 'not-allowed',
                 fontWeight: 600, fontSize: '0.9rem', display: 'inline-flex', alignItems: 'center', gap: 8
               }}>
-              <i className="fas fa-paper-plane"></i>Send Offer
+              {isSendingOffer ? <i className="fas fa-spinner fa-spin"></i> : <i className="fas fa-paper-plane"></i>} Send Offer
             </button>
           </div>
         </div>
@@ -3262,10 +3366,14 @@ const GeneratorDashboard = () => {
         .gp-table th { text-align: left; padding: 14px 18px; background: rgba(255,255,255,0.03); color: #9ca3af; font-size: 0.75rem; text-transform: uppercase; font-weight: 600; border-bottom: 1px solid rgba(255,255,255,0.05); }
         .gp-table td { padding: 14px 18px; border-bottom: 1px solid rgba(255,255,255,0.03); vertical-align: middle; font-size: 0.9rem; color: #e5e7eb; }
         .gp-table tr:last-child td { border-bottom: none; }
-        .badge { padding: 3px 11px; border-radius: 999px; font-size: 0.7rem; font-weight: 700; text-transform: capitalize; }
+        .badge { padding: 3px 11px; border-radius: 999px; font-size: 0.7rem; font-weight: 700; text-transform: capitalize; display: inline-block; }
         .status-active { background: rgba(34,197,94,0.15); color: #34d399; }
         .status-pending { background: rgba(251,191,36,0.15); color: #fbbf24; }
         .status-closed { background: rgba(107,114,128,0.15); color: #9ca3af; }
+        .status-requested { background: rgba(96,165,250,0.15); color: #60a5fa; }
+        .status-accepted { background: rgba(6,182,212,0.15); color: #22d3ee; }
+        .status-paid { background: rgba(34,197,94,0.2); color: #4ade80; }
+        .status-completed { background: rgba(167,139,250,0.15); color: #c4b5fd; }
         .gp-thumb { width: 46px; height: 46px; border-radius: 8px; object-fit: cover; border: 1px solid rgba(255,255,255,0.1); }
         .gp-thumb-placeholder { width: 46px; height: 46px; border-radius: 8px; background: rgba(255,255,255,0.03); color: #4b5563; display: flex; align-items: center; justify-content: center; font-size: 1.1rem; }
         .gp-bid-chip { display: inline-flex; align-items: center; gap: 6px; background: rgba(251,191,36,0.15); color: #fbbf24; padding: 4px 10px; border-radius: 999px; font-size: 0.75rem; font-weight: 600; }
@@ -3276,16 +3384,11 @@ const GeneratorDashboard = () => {
         .gp-filters-grid input::placeholder { color: #6b7280; }
         .gp-section-block { background: rgba(139,92,246,0.05); border: 1px solid rgba(139,92,246,0.15); border-radius: 14px; padding: 18px; margin-bottom: 8px; }
         .gp-section-block h3 { margin-top: 0; font-size: 1rem; color: #c4b5fd; }
-        .gp-ai-item { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid rgba(255,255,255,0.05); }
-        .gp-ai-item:last-child { border-bottom: none; }
-        .gp-match-badge { background: rgba(139,92,246,0.15); color: #a78bfa; padding: 2px 9px; border-radius: 999px; font-size: 0.7rem; margin-left: 8px; font-weight: 700; }
-        .gp-ai-details { font-size: 0.82rem; color: #9ca3af; margin-top: 2px; }
+        .gp-ai-card-wrapper { background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05); border-radius: 14px; padding: 12px; margin-bottom: 16px; transition: 0.2s; }
+        .gp-ai-card-wrapper:hover { background: rgba(255,255,255,0.04); border-color: rgba(139,92,246,0.3); }
         .gp-requests-grid { display: grid; gap: 14px; }
-        .gp-pagination { display: flex; justify-content: center; align-items: center; gap: 14px; margin-top: 18px; }
-        .gp-pagination button { padding: 6px 14px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.1); background: transparent; color: #e5e7eb; cursor: pointer; }
-        .gp-pagination button:disabled { opacity: 0.4; cursor: not-allowed; }
-        .gp-pill-tabs { display: inline-flex; gap: 4px; background: rgba(255,255,255,0.05); padding: 4px; border-radius: 12px; margin-bottom: 22px; border: 1px solid rgba(255,255,255,0.05); }
-        .gp-pill-tab { display: flex; align-items: center; gap: 8px; padding: 9px 18px; border-radius: 9px; border: none; background: transparent; color: #9ca3af; font-size: 0.85rem; font-weight: 600; cursor: pointer; }
+        .gp-pill-tabs { display: inline-flex; gap: 4px; background: rgba(255,255,255,0.05); padding: 4px; border-radius: 12px; margin-bottom: 22px; border: 1px solid rgba(255,255,255,0.05); flex-wrap: wrap; }
+        .gp-pill-tab { display: flex; align-items: center; gap: 8px; padding: 9px 18px; border-radius: 9px; border: none; background: transparent; color: #9ca3af; font-size: 0.85rem; font-weight: 600; cursor: pointer; white-space: nowrap; }
         .gp-pill-tab.active { background: rgba(99,102,241,0.15); color: white; }
         .gp-pill-dot { width: 7px; height: 7px; border-radius: 50%; }
         .gp-pill-count { font-size: 0.65rem; font-weight: 700; padding: 2px 8px; border-radius: 999px; background: rgba(255,255,255,0.05); color: #9ca3af; }
@@ -3301,7 +3404,6 @@ const GeneratorDashboard = () => {
         .gp-bid-table td { padding: 10px 14px; border-top: 1px solid rgba(255,255,255,0.05); font-size: 0.85rem; color: #e5e7eb; }
         .gp-top-bid-row { background: rgba(251,191,36,0.05); }
         .gp-top-bid-badge { margin-left: 8px; background: rgba(251,191,36,0.15); color: #fbbf24; font-size: 0.65rem; font-weight: 700; padding: 2px 8px; border-radius: 999px; }
-        .gp-bid-cta { display: flex; justify-content: space-between; align-items: center; margin-top: 14px; padding-top: 14px; border-top: 1px dashed rgba(255,255,255,0.08); flex-wrap: wrap; gap: 10px; font-size: 0.9rem; }
         .gp-form-card { background: rgba(255,255,255,0.03); border-radius: 14px; padding: 24px; border: 1px solid rgba(255,255,255,0.05); max-width: 760px; }
         .gp-form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; }
         .gp-form-group label { display: block; margin-bottom: 6px; font-size: 0.85rem; font-weight: 600; color: #d1d5db; }
@@ -3316,20 +3418,16 @@ const GeneratorDashboard = () => {
   transition: background 0.3s, border-color 0.3s, color 0.3s;
   color-scheme: dark;
 }
-
 [data-theme="light"] .gp-form-group input,
 [data-theme="light"] .gp-form-group select,
 [data-theme="light"] .gp-form-group textarea {
   color-scheme: light;
 }
-
-/* ✅ Fix dropdown options visibility */
 .gp-form-group select option {
   background: #1a1a2e;
   color: #ffffff;
   padding: 8px;
 }
-
 [data-theme="light"] .gp-form-group select option {
   background: #ffffff;
   color: #0f172a;
@@ -3349,10 +3447,7 @@ const GeneratorDashboard = () => {
         .gp-checkbox-row { display: flex; align-items: center; gap: 10px; font-weight: 700; color: #fbbf24; cursor: pointer; }
         .gp-checkbox-row input { width: 18px; height: 18px; accent-color: #8b5cf6; }
         .gp-bid-hint { margin: 8px 0 0; font-size: 0.82rem; color: #fbbf24; opacity: 0.7; }
-        .gp-wallet-info { background: rgba(255,255,255,0.03); padding: 14px; border-radius: 10px; margin-bottom: 16px; border: 1px solid rgba(255,255,255,0.05); }
-        .gp-limit-note { color: #6b7280; font-size: 0.8rem; margin: 4px 0 0; }
         
-        /* ✅ Messages two-pane styles */
         .gp-messages-page { height: calc(100vh - 160px); min-height: 460px; }
         .gp-messages-grid { display: grid; grid-template-columns: 290px 1fr; gap: 18px; height: 100%; }
         .gp-conv-panel { background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05); border-radius: 12px; display: flex; flex-direction: column; overflow: hidden; }
@@ -3404,42 +3499,6 @@ const GeneratorDashboard = () => {
           .gp-conv-panel { max-height: 220px; }
           .gp-chat-panel { min-height: 400px; }
         }
-          .gp-loading-container { min-height: 100vh; display: flex; align-items: center; justify-content: center; background: #0a0a0f; }
-.gp-loading-card { text-align: center; }
-.gp-loading-logo { display: flex; flex-direction: column; align-items: center; gap: 12px; }
-.gp-loading-logo-icon {
-  width: 84px; height: 84px; border-radius: 22px;
-  background: linear-gradient(135deg, #6366f1, #8b5cf6);
-  display: flex; align-items: center; justify-content: center;
-  font-size: 2.4rem; color: white;
-  animation: gp-logo-pulse 1.6s ease-in-out infinite;
-  box-shadow: 0 8px 32px rgba(99,102,241,0.4);
-}
-@keyframes gp-logo-pulse {
-  0%, 100% { transform: scale(1); box-shadow: 0 8px 32px rgba(99,102,241,0.4); }
-  50% { transform: scale(1.08); box-shadow: 0 12px 40px rgba(99,102,241,0.6); }
-}
-.gp-loading-logo-text {
-  margin: 0; font-size: 1.7rem; font-weight: 800;
-  background: linear-gradient(135deg, #a78bfa, #60a5fa);
-  -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-  background-clip: text; letter-spacing: -0.5px;
-}
-.gp-loading-tagline { margin: 0; color: #6b7280; font-size: 0.85rem; letter-spacing: 0.4px; }
-.gp-loading-bar {
-  width: 220px; height: 3px; background: rgba(255,255,255,0.06);
-  border-radius: 999px; overflow: hidden; margin-top: 18px;
-}
-.gp-loading-bar-fill {
-  height: 100%; width: 40%;
-  background: linear-gradient(90deg, #6366f1, #8b5cf6);
-  border-radius: 999px;
-  animation: gp-loading-slide 1.4s ease-in-out infinite;
-}
-@keyframes gp-loading-slide {
-  0% { transform: translateX(-100%); }
-  100% { transform: translateX(350%); }
-}
       `}
       </style>
     </div>
